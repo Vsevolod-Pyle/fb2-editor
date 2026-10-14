@@ -272,6 +272,14 @@ QTextEdit#bookEditor {{ background: {c['paper']}; color: {c['paper_text']}; bord
 #welcomeText {{ color: {c['muted']}; font-size: 11pt; }}
 #emptyPane {{ background: {c['paper']}; }}
 
+#middleBar {{ background: {c['surface']}; }}
+QScrollBar#middleScroll {{ background: transparent; width: 18px; margin: 0; }}
+QScrollBar#middleScroll::handle:vertical {{ background: {c['accent_soft']}; border: 1px solid {c['accent']};
+    border-radius: 6px; min-height: 40px; margin: 0 3px; }}
+QScrollBar#middleScroll::handle:vertical:hover {{ background: {c['accent']}; }}
+#notePopup {{ background: {c['surface']}; border: 1px solid {c['border']}; border-radius: 10px; }}
+#noteTitle {{ font-weight: 700; color: {c['accent']}; }}
+#noteText {{ color: {c['text']}; }}
 QSplitter::handle {{ background: {c['border']}; }}
 QSplitter::handle:horizontal {{ width: 1px; }}
 

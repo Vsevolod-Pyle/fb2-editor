@@ -54,6 +54,8 @@ TEXT_LEAVES = {"p", "v", "subtitle", "text-author", "date"}
 # Block kinds that are rendered bold by the editor itself (bold is not exported).
 HEADING_KINDS = {"title", "subtitle"}
 
+LINK_COLOR = QColor("#3d7be0")
+
 IMAGE_MAX_W = 560
 IMAGE_MAX_H = 680
 
@@ -144,7 +146,7 @@ def block_format(kind: str, path: str) -> QTextBlockFormat:
     parts = [k.split(":", 1)[0] for k in path.split("/") if k]
     left = 0
     if "epigraph" in parts:
-        left += 140
+        left += 90
     if "cite" in parts:
         left += 36
     if "annotation" in parts:
@@ -173,7 +175,7 @@ def block_format(kind: str, path: str) -> QTextBlockFormat:
     elif kind == "v":
         bf.setAlignment(Qt.AlignmentFlag.AlignLeft)
     else:  # p
-        bf.setAlignment(Qt.AlignmentFlag.AlignJustify)
+        bf.setAlignment(Qt.AlignmentFlag.AlignLeft if "epigraph" in parts else Qt.AlignmentFlag.AlignJustify)
         if "epigraph" not in parts:
             bf.setTextIndent(28)
         bf.setBottomMargin(2)
@@ -339,6 +341,7 @@ class _Loader:
                     f.setAnchor(True)
                     f.setAnchorHref(get_href(ch))
                     f.setFontUnderline(True)
+                    f.setForeground(LINK_COLOR)  # not exported: colour of links is ignored on save
                     if ch.get("type"):
                         f.setProperty(C_LINK_TYPE, ch.get("type"))
                 elif tag == "style":

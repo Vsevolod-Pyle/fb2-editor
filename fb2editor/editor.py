@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 
-from PySide6.QtCore import QMimeData, Qt, QUrl, Signal
+import html
+
+from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
+    QDesktopServices,
     QFont,
     QImage,
     QKeyEvent,
@@ -16,10 +19,20 @@ from PySide6.QtGui import (
     QTextDocument,
     QTextFormat,
 )
-from PySide6.QtWidgets import QFrame, QTextEdit
+from PySide6.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QTextEdit,
+    QToolTip,
+    QVBoxLayout,
+)
 
 from .fb2doc import (
     OBJ,
+    P_ID,
     P_KIND,
     P_PATH,
     Fb2Book,
@@ -75,10 +88,52 @@ def style_of_block(block) -> str:
     return "normal"
 
 
+class NotePopup(QFrame):
+    """Small window with the text of a footnote."""
+
+    def __init__(self, editor: "BookEditor", target: int, title: str, text_html: str):
+        super().__init__(editor, Qt.WindowType.Popup)
+        self.setObjectName("notePopup")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
+        head = QLabel(title or "Сноска")
+        head.setObjectName("noteTitle")
+        body = QLabel(text_html or "<i>Текст сноски пуст</i>")
+        body.setObjectName("noteText")
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        body.setMaximumWidth(460)
+        body.setMinimumWidth(min(460, max(200, len(body.text()) * 4)))
+        lay.addWidget(head)
+        lay.addWidget(body)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        go = QPushButton("Перейти к сноске")
+        go.setToolTip("Ctrl+щелчок по ссылке — сразу перейти; Alt+← — вернуться")
+        go.clicked.connect(lambda: (self.close(), editor.jump_to_block(target)))
+        row.addWidget(go)
+        lay.addLayout(row)
+
+    def show_at(self, pos: QPoint):
+        self.adjustSize()
+        screen = QApplication.screenAt(pos) or QApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = min(max(area.left(), pos.x() - 30), area.right() - self.width())
+        y = pos.y() + 14
+        if y + self.height() > area.bottom():
+            y = pos.y() - self.height() - 24
+        self.move(x, y)
+        self.show()
+
+
 class BookEditor(QTextEdit):
     focused = Signal()
     zoomRequested = Signal(int)
     formatChanged = Signal()
+    noteJumped = Signal()
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -91,6 +146,11 @@ class BookEditor(QTextEdit):
         self.setObjectName("bookEditor")
         self._pair_block = -1
         self._find_selections: list = []
+        self._ids_rev = -1
+        self._ids: dict[str, tuple[int, str | None]] = {}
+        self._back: list[int] = []
+        self._press_pos = None
+        self.viewport().setMouseTracking(True)
         self.cursorPositionChanged.connect(self.formatChanged)
         self.currentCharFormatChanged.connect(lambda _f: self.formatChanged.emit())
 
@@ -105,6 +165,8 @@ class BookEditor(QTextEdit):
         doc.setParent(self)  # the editor deletes its previous child document itself
         self.setDocument(doc)
         self._pair_block = -1
+        self._ids_rev = -1
+        self._back.clear()
         self._update_extra()
         self.setReadOnly(book is None)
 
@@ -333,10 +395,169 @@ class BookEditor(QTextEdit):
                     return
             self._set_block(block, "text-author", f"{sec}/{book.new_key('cite')}")
 
+
+    # ------------------------------------------------------------------ #
+    #  Footnotes and links
+    # ------------------------------------------------------------------ #
+    def _id_index(self) -> dict:
+        """id -> (first block number, container key or None)."""
+        doc = self.document()
+        if self._ids_rev == doc.revision():
+            return self._ids
+        key_ids = {}
+        if self.book:
+            for key, attrs in self.book.attrs.items():
+                for name, value in attrs.items():
+                    if name.rsplit("}", 1)[-1] == "id" and value:
+                        key_ids[key] = value
+        ids: dict[str, tuple[int, str | None]] = {}
+        b = doc.begin()
+        while b.isValid():
+            pid = b.blockFormat().property(P_ID)
+            if pid and str(pid) not in ids:
+                ids[str(pid)] = (b.blockNumber(), None)
+            for k in block_path(b).split("/"):
+                i = key_ids.get(k)
+                if i and i not in ids:
+                    ids[i] = (b.blockNumber(), k)
+            b = b.next()
+        self._ids, self._ids_rev = ids, doc.revision()
+        return ids
+
+    def note_target(self, href: str):
+        if not href.startswith("#"):
+            return None
+        return self._id_index().get(href[1:])
+
+    def note_content(self, href: str) -> tuple[str, str]:
+        """(title, html text) of the footnote the link points to."""
+        target = self.note_target(href)
+        if not target:
+            return "", ""
+        number, key = target
+        block = self.document().findBlockByNumber(number)
+        titles, paras = [], []
+        while block.isValid():
+            path = block_path(block)
+            if key is None:
+                if block.blockNumber() != number:
+                    break
+            elif key not in path.split("/"):
+                break
+            text = block.text().replace(OBJ, "").strip()
+            if text:
+                if block_kind(block) == "title":
+                    titles.append(text)
+                else:
+                    paras.append(text)
+            if sum(len(p) for p in paras) > 3000:
+                paras.append("…")
+                break
+            block = block.next()
+        if not paras and titles:
+            paras, titles = titles, []
+        body = "".join(f"<p style='margin:0 0 6px 0'>{html.escape(p)}</p>" for p in paras)
+        return " ".join(titles), body
+
+    def jump_to_block(self, number: int):
+        doc = self.document()
+        block = doc.findBlockByNumber(number)
+        if not block.isValid():
+            return
+        self._back.append(self.textCursor().position())
+        self._move_to(block.position())
+        self.noteJumped.emit()
+
+    def go_back(self) -> bool:
+        if not self._back:
+            return False
+        self._move_to(self._back.pop())
+        return True
+
+    def _move_to(self, position: int):
+        doc = self.document()
+        c = QTextCursor(doc)
+        c.setPosition(min(max(0, position), doc.characterCount() - 1))
+        self.setTextCursor(c)
+        rect = doc.documentLayout().blockBoundingRect(c.block())
+        self.verticalScrollBar().setValue(int(rect.y() - self.viewport().height() * 0.3))
+
+    def _open_link(self, href: str, global_pos: QPoint, jump: bool):
+        target = self.note_target(href)
+        if target:
+            if jump:
+                self.jump_to_block(target[0])
+            else:
+                title, body = self.note_content(href)
+                NotePopup(self, target[0], title, body).show_at(global_pos)
+        elif href.startswith(("http://", "https://", "mailto:")) and jump:
+            QDesktopServices.openUrl(QUrl(href))
+
+    def mouseMoveEvent(self, e):
+        super().mouseMoveEvent(e)
+        href = self.anchorAt(e.position().toPoint())
+        if href:
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+            if self.note_target(href) and not (e.buttons() & Qt.MouseButton.LeftButton):
+                title, body = self.note_content(href)
+                tip = (f"<b>{html.escape(title)}</b><br>" if title else "") + body
+                QToolTip.showText(e.globalPosition().toPoint(), f"<div style='max-width:420px'>{tip}</div>",
+                                  self.viewport())
+            elif href.startswith("http"):
+                QToolTip.showText(e.globalPosition().toPoint(), f"{href}<br><i>Ctrl+щелчок — открыть</i>",
+                                  self.viewport())
+        else:
+            self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
+            QToolTip.hideText()
+
+    def mousePressEvent(self, e):
+        self._press_pos = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        pos = e.position().toPoint()
+        if e.button() != Qt.MouseButton.LeftButton or self._press_pos is None:
+            return
+        moved = (pos - self._press_pos).manhattanLength() > 4
+        self._press_pos = None
+        if moved or self.textCursor().hasSelection():
+            return
+        href = self.anchorAt(pos)
+        if href:
+            ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            self._open_link(href, e.globalPosition().toPoint(), jump=ctrl)
+
+    def _leave_link_format(self):
+        """Text typed right after a link must not become part of the link."""
+        c = self.textCursor()
+        if c.hasSelection():
+            return
+        fmt = c.charFormat()
+        if not fmt.isAnchor():
+            return
+        after = QTextCursor(c)
+        if after.movePosition(QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveMode.KeepAnchor) \
+                and after.charFormat().isAnchor() and after.charFormat().anchorHref() == fmt.anchorHref() \
+                and not c.atBlockEnd():
+            return  # typing inside the link text
+        clean = QTextCharFormat(fmt)
+        clean.setAnchor(False)
+        clean.clearProperty(QTextFormat.Property.AnchorHref)
+        clean.clearProperty(QTextFormat.Property.ForegroundBrush)
+        clean.setFontUnderline(False)
+        clean.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignNormal)
+        self.setCurrentCharFormat(clean)
+
     # ------------------------------------------------------------------ #
     #  Keyboard / mouse
     # ------------------------------------------------------------------ #
     def keyPressEvent(self, e: QKeyEvent):
+        if e.key() == Qt.Key.Key_Left and e.modifiers() == Qt.KeyboardModifier.AltModifier:
+            if self.go_back():
+                return
+        if e.text() and e.text().isprintable() and not (e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._leave_link_format()
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not self.isReadOnly() and self.book:
             c = self.textCursor()
             block = c.block()

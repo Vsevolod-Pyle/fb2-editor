@@ -10,6 +10,7 @@ from functools import partial
 from PySide6.QtCore import QEvent, QLibraryInfo, QLocale, QSize, Qt, QTimer, QTranslator, QUrl
 from PySide6.QtGui import (
     QAction,
+    QCursor,
     QCloseEvent,
     QColor,
     QDesktopServices,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -38,11 +40,14 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QScrollBar,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QStyledItemDelegate,
     QStyle,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -50,7 +55,7 @@ from PySide6.QtWidgets import (
 from . import theme
 from .dialogs import FB2_FILTER, NewProjectDialog, SaveVersionDialog
 from .editor import STYLES, BookEditor
-from .fb2doc import load_fb2, read_fb2_bytes, save_fb2
+from .fb2doc import block_kind, block_path, load_fb2, read_fb2_bytes, save_fb2
 from .projects import SIDES, Project, ProjectStore
 from .sync import ScrollSync
 
@@ -181,6 +186,98 @@ class Sidebar(QFrame):
         m.exec(self.list.mapToGlobal(pos))
 
 
+
+# --------------------------------------------------------------------------- #
+#  Responsive top bar and the shared scroll bar between the books
+# --------------------------------------------------------------------------- #
+
+
+class TopBar(QFrame):
+    """Tool bar that hides less important controls when the window is narrow."""
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+
+    def minimumSizeHint(self):
+        return QSize(360, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.win._fit_toolbar()
+
+
+class MiddleBar(QFrame):
+    """A scroll bar between the two books that scrolls both of them at once."""
+
+    WIDTH = 18
+    STEPS = 10000
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.setObjectName("middleBar")
+        self.setFixedWidth(self.WIDTH)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 4, 0, 4)
+        lay.setSpacing(0)
+        self.bar = QScrollBar(Qt.Orientation.Vertical)
+        self.bar.setObjectName("middleScroll")
+        self.bar.setRange(0, self.STEPS)
+        self.bar.setSingleStep(40)
+        self.bar.setToolTip("Прокрутка обеих книг сразу")
+        lay.addWidget(self.bar)
+        self._updating = False
+        self.bar.valueChanged.connect(self._moved)
+        self.bar.sliderMoved.connect(self._show_chapter)
+
+    def lead(self):
+        for ed in (self.win.left.editor, self.win.right.editor):
+            if ed.book:
+                return ed
+        return None
+
+    def update_from_books(self):
+        ed = self.lead()
+        if ed is None or self.bar.isSliderDown():
+            return
+        sb = ed.verticalScrollBar()
+        total = sb.maximum() + sb.pageStep()
+        self._updating = True
+        try:
+            self.bar.setPageStep(max(1, int(self.STEPS * sb.pageStep() / max(1, total))))
+            self.bar.setValue(int(round(self.STEPS * sb.value() / max(1, sb.maximum()))))
+        finally:
+            self._updating = False
+
+    def _moved(self, value: int):
+        if self._updating:
+            return
+        frac = value / self.STEPS
+        eds = [e for e in (self.win.left.editor, self.win.right.editor) if e.book]
+        if not eds:
+            return
+        sync = self.win.sync
+        if sync.enabled and len(eds) == 2:
+            sb = eds[0].verticalScrollBar()
+            sb.setValue(int(round(frac * sb.maximum())))
+        else:
+            sync.paused = True
+            try:
+                for ed in eds:
+                    sb = ed.verticalScrollBar()
+                    sb.setValue(int(round(frac * sb.maximum())))
+            finally:
+                sync.paused = False
+
+    def _show_chapter(self, _value: int):
+        ed = self.lead()
+        if ed is None:
+            return
+        title = self.win.chapter_title(ed)
+        if title:
+            QToolTip.showText(QCursor.pos(), title, self.bar)
+
 # --------------------------------------------------------------------------- #
 #  One side: header + editor
 # --------------------------------------------------------------------------- #
@@ -207,7 +304,8 @@ class Pane(QFrame):
         self.badge.installEventFilter(self)
         self.title = QLabel("")
         self.title.setObjectName("paneTitle")
-        self.title.setMinimumWidth(40)
+        self.title.setMinimumWidth(0)
+        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.dirty = QLabel("●")
         self.dirty.setObjectName("dirty")
         self.dirty.setToolTip("Есть несохранённые изменения")
@@ -215,8 +313,10 @@ class Pane(QFrame):
         self.versions = QComboBox()
         self.versions.setObjectName("flat")
         self.versions.setToolTip("Какую версию файла показывать")
-        self.versions.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.versions.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.versions.setMinimumContentsLength(14)
         self.versions.setMaximumWidth(330)
+        self.versions.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.versions.activated.connect(self._version_chosen)
         self.menu_btn = QToolButton()
         self.menu_btn.setToolTip("Действия с файлом")
@@ -304,10 +404,10 @@ class FindBar(QFrame):
         self.find = QLineEdit()
         self.find.setPlaceholderText("Найти…")
         self.find.setClearButtonEnabled(True)
-        self.find.setMinimumWidth(220)
+        self.find.setMinimumWidth(140)
         self.replace = QLineEdit()
         self.replace.setPlaceholderText("Заменить на…")
-        self.replace.setMinimumWidth(180)
+        self.replace.setMinimumWidth(110)
         self.case = QCheckBox("Аа")
         self.case.setToolTip("Учитывать регистр")
         self.both = QCheckBox("В обеих книгах")
@@ -386,6 +486,10 @@ class MainWindow(QMainWindow):
             ed.zoomRequested.connect(self.change_zoom)
             ed.formatChanged.connect(self._update_format_state)
             ed.cursorPositionChanged.connect(partial(self._cursor_moved, ed))
+            ed.verticalScrollBar().valueChanged.connect(lambda _v: self.middle.update_from_books())
+            ed.verticalScrollBar().rangeChanged.connect(lambda _a, _b: self.middle.update_from_books())
+            ed.noteJumped.connect(lambda: self.statusBar().showMessage(
+                "Переход к сноске. Alt+← — вернуться к тексту", 5000))
         self.apply_theme()
         self.apply_view()
 
@@ -395,11 +499,20 @@ class MainWindow(QMainWindow):
         self._state_timer.start()
 
         geo = self.settings.get("geometry")
+        restored = False
         if geo:
             try:
-                self.restoreGeometry(bytes.fromhex(geo))
+                restored = self.restoreGeometry(bytes.fromhex(geo))
             except ValueError:
-                pass
+                restored = False
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            if not restored:
+                self.resize(int(avail.width() * 0.9), int(avail.height() * 0.88))
+                self.move(avail.center() - self.rect().center())
+            elif not self.isMaximized() and (self.width() > avail.width() or self.height() > avail.height()):
+                self.resize(min(self.width(), avail.width()), min(self.height(), avail.height()))
         self.sidebar.setVisible(self.settings.get("sidebar", True))
         self.act["sidebar"].setChecked(self.sidebar.isVisible())
 
@@ -475,10 +588,13 @@ class MainWindow(QMainWindow):
         b.setIconSize(theme.ICON_SIZE)
         b.setProperty("iconKind", icon_kind or key)
         self._tools.append(b)
+        self._tool_btns[key] = b
         return b
 
     def _build_ui(self):
         self._tools: list[QToolButton] = []
+        self._tool_btns: dict[str, QToolButton] = {}
+        self._fitting = False
         root = QWidget()
         outer = QHBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -493,13 +609,16 @@ class MainWindow(QMainWindow):
         outer.addWidget(main, 1)
 
         # -- top bar ------------------------------------------------------ #
-        top = QFrame()
+        top = TopBar(self)
         top.setObjectName("topBar")
+        self.top_bar = top
         t = QHBoxLayout(top)
+        t.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         t.setContentsMargins(8, 6, 10, 6)
         t.setSpacing(2)
         t.addWidget(self._tool("sidebar", "menu"))
         self.project_label = QLabel("")
+        self.project_label.setMaximumWidth(220)
         self.project_label.setStyleSheet("font-weight:600; padding: 0 8px;")
         t.addWidget(self.project_label)
         t.addWidget(hline())
@@ -509,7 +628,7 @@ class MainWindow(QMainWindow):
 
         self.style_box = QComboBox()
         self.style_box.setToolTip("Стиль абзаца")
-        self.style_box.setMinimumWidth(170)
+        self.style_box.setMinimumWidth(150)
         for key, (label, sc) in STYLES.items():
             self.style_box.addItem(label, key)
             self.style_box.setItemData(self.style_box.count() - 1, f"{label}  ({sc})", Qt.ItemDataRole.ToolTipRole)
@@ -536,6 +655,7 @@ class MainWindow(QMainWindow):
         self.font_box = QFontComboBox()
         self.font_box.setToolTip("Шрифт для чтения (только отображение)")
         self.font_box.setMaximumWidth(180)
+        self.font_box.setMinimumWidth(110)
         self.font_box.setCurrentFont(QFont(self.font_family))
         self.font_box.currentFontChanged.connect(self._font_changed)
         t.addWidget(self.font_box)
@@ -564,6 +684,7 @@ class MainWindow(QMainWindow):
         vbtn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.act["save_version"].setIconText("Версия")
         t.addWidget(vbtn)
+        self.version_btn = vbtn
         mv.addWidget(top)
 
         self.find_bar = FindBar(self)
@@ -576,10 +697,15 @@ class MainWindow(QMainWindow):
         self.right = Pane(self, "right")
         self.splitter = QSplitter(Qt.Orientation.Horizontal)
         self.splitter.addWidget(self.left)
+        self.middle = MiddleBar(self)
+        self.splitter.addWidget(self.middle)
         self.splitter.addWidget(self.right)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(1)
-        self.splitter.setSizes([1, 1])
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setStretchFactor(2, 1)
+        self.splitter.setSizes([1000, MiddleBar.WIDTH, 1000])
         self.content.addWidget(self.splitter)
 
         welcome = QFrame()
@@ -622,6 +748,51 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     #  Theme / view
     # ------------------------------------------------------------------ #
+    def _fit_toolbar(self):
+        """Collapse secondary controls step by step until the tool bar fits."""
+        if self._fitting:
+            return
+        self._fitting = True
+        try:
+            b = self._tool_btns
+            text_btns = (self.save_btn, self.version_btn)
+            steps = [
+                lambda on: [x.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon if on
+                                                 else Qt.ToolButtonStyle.ToolButtonIconOnly) for x in text_btns],
+                lambda on: self.font_box.setVisible(on),
+                lambda on: self.project_label.setVisible(on),
+                lambda on: [b[k].setVisible(on) for k in ("sup", "sub")],
+                lambda on: [b[k].setVisible(on) for k in ("clear", "image")],
+                lambda on: [b[k].setVisible(on) for k in ("theme", "find", "undo", "redo")],
+            ]
+            for step in steps:
+                step(True)
+            lay = self.top_bar.layout()
+            for step in steps:
+                lay.activate()
+                if lay.sizeHint().width() <= self.top_bar.width():
+                    break
+                step(False)
+        finally:
+            self._fitting = False
+
+    def chapter_title(self, ed: BookEditor) -> str:
+        """Title of the chapter shown at the top of the editor."""
+        idx = self.sync.index(ed)
+        if not idx.content:
+            return ""
+        y = ed.verticalScrollBar().value() + ed.viewport().height() * 0.3
+        k = self.sync.content_index_at(ed, idx, y)
+        anchor = max((a for a in idx.anchors if a <= k), default=0)
+        block = ed.document().findBlockByNumber(idx.content[anchor])
+        parts = [block.text()]
+        nxt = block.next()
+        while nxt.isValid() and block_kind(nxt) == "title" and block_path(nxt) == block_path(block) \
+                and len(parts) < 3:
+            parts.append(nxt.text())
+            nxt = nxt.next()
+        return " · ".join(t.strip() for t in parts if t.strip())[:120]
+
     def apply_theme(self):
         c = self.colors = theme.DARK if self.dark else theme.LIGHT
         app = QApplication.instance()
@@ -816,6 +987,7 @@ class MainWindow(QMainWindow):
         self.store.save_settings()
         self.content.setCurrentIndex(0)
         self.project_label.setText(p.name)
+        self._fit_toolbar()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for side in SIDES:
@@ -824,7 +996,7 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self.sidebar.refresh(p.id)
         sizes = p.state.get("splitter")
-        if sizes:
+        if sizes and len(sizes) == 3:
             self.splitter.setSizes(sizes)
         QTimer.singleShot(30, self._restore_positions)
         self._update_title()

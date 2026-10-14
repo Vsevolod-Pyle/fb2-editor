@@ -151,3 +151,53 @@ if __name__ == "__main__":
     test_sync_scroll_matches_paragraphs()
     test_editing_and_saving()
     print("ok")
+
+
+def test_window_fits_small_screens():
+    w, _p = _window()
+    assert w.minimumSizeHint().width() <= 1100, w.minimumSizeHint()
+    w.resize(1100, 700)
+    app.processEvents()
+    assert w.top_bar.layout().minimumSize().width() <= w.top_bar.width()
+    w.resize(1600, 900)
+    app.processEvents()
+    assert w.font_box.isVisible()
+    w.close()
+
+
+def test_middle_bar_scrolls_both_books():
+    w, _p = _window()
+    L, R = w.left.editor, w.right.editor
+    w.middle.bar.setValue(MIDDLE_HALF := w.middle.STEPS // 2)
+    app.processEvents()
+    assert L.verticalScrollBar().value() > 0 and R.verticalScrollBar().value() > 0
+    w.sync.enabled = False
+    w.middle.bar.setValue(w.middle.STEPS)
+    app.processEvents()
+    assert L.verticalScrollBar().value() == L.verticalScrollBar().maximum()
+    assert R.verticalScrollBar().value() == R.verticalScrollBar().maximum()
+    L.verticalScrollBar().setValue(0)
+    app.processEvents()
+    assert w.middle.bar.value() == 0 and MIDDLE_HALF
+    w.close()
+
+
+def test_footnotes():
+    from fb2editor.editor import BookEditor
+    from fb2editor.fb2doc import load_fb2
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    doc, book = load_fb2(open(os.path.join(here, "sample.fb2"), "rb").read())
+    ed = BookEditor("left")
+    ed.set_book(doc, book)
+    ed.resize(600, 400)
+    ed.show()
+    app.processEvents()
+    title, body = ed.note_content("#n1")
+    assert title == "1" and "Текст сноски." in body
+    target = ed.note_target("#n1")[0]
+    assert doc.findBlockByNumber(target).text() == "1"
+    start = ed.textCursor().position()
+    ed.jump_to_block(target)
+    assert ed.textCursor().block().blockNumber() == target
+    assert ed.go_back() and ed.textCursor().position() == start
