@@ -136,6 +136,9 @@ class NotePopup(QFrame):
 
 
 
+NOTE_COLOR = QColor("#f2a93b")
+
+
 class Gutter(QWidget):
     """Paragraph numbers drawn in the left margin of the editor."""
 
@@ -180,6 +183,11 @@ class Gutter(QWidget):
                 line = bl.lineAt(0)
                 top += line.y()
                 line_h = line.height()
+            if content[i] in ed._note_blocks:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(NOTE_COLOR)
+                d = max(6, int(line_h * 0.3))
+                p.drawEllipse(3, int(top + (line_h - d) / 2), d, d)
             p.setPen(self.current if content[i] == cur else self.fg)
             p.drawText(QRect(0, int(top), self.width() - 8, int(line_h)),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(i + 1))
@@ -192,6 +200,10 @@ class BookEditor(QTextEdit):
     formatChanged = Signal()
     noteJumped = Signal()
     blockDoubleClicked = Signal(int)
+    noteClicked = Signal(str)
+    noteAddRequested = Signal()
+    noteEditRequested = Signal(str)
+    noteDeleteRequested = Signal(str)
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -221,6 +233,9 @@ class BookEditor(QTextEdit):
         self._spell_timer.setInterval(120)
         self._spell_timer.timeout.connect(self.refresh_spelling)
         self.show_numbers = True
+        self._note_ranges: list = []  # (start, end, id, text)
+        self._note_sels: list = []
+        self._note_blocks: set[int] = set()
         self.gutter = Gutter(self)
         self.verticalScrollBar().valueChanged.connect(self._view_changed)
         self.cursorPositionChanged.connect(self.gutter.update)
@@ -241,6 +256,9 @@ class BookEditor(QTextEdit):
         self._pair_block = -1
         self._flash_block = -1
         self._spell_sels = []
+        self._note_ranges = []
+        self._note_sels = []
+        self._note_blocks = set()
         self._ids_rev = -1
         self._back.clear()
         self._update_extra()
@@ -266,7 +284,7 @@ class BookEditor(QTextEdit):
         f = QFont(self.font())
         f.setPointSizeF(max(7.0, self.document().defaultFont().pointSizeF() * 0.62))
         digits = len(str(max(1, self.document().blockCount())))
-        return QFontMetrics(f).horizontalAdvance("9" * digits) + 14
+        return QFontMetrics(f).horizontalAdvance("9" * digits) + 22
 
     def _update_gutter_width(self):
         w = self.gutter_width()
@@ -365,6 +383,17 @@ class BookEditor(QTextEdit):
 
     def contextMenuEvent(self, e):
         menu = self.createStandardContextMenu(e.pos())
+        if self.book is not None:
+            menu.addSeparator()
+            hit_note = self.note_at(e.pos())
+            if hit_note:
+                nid = hit_note[0]
+                menu.addAction("Изменить заметку…", lambda: self.noteEditRequested.emit(nid))
+                menu.addAction("Удалить заметку", lambda: self.noteDeleteRequested.emit(nid))
+            else:
+                if not self.textCursor().hasSelection():
+                    self.setTextCursor(self.cursorForPosition(e.pos()))
+                menu.addAction("Добавить заметку…  (Ctrl+Alt+M)", self.noteAddRequested.emit)
         hit = self.misspelled_at(e.pos())
         if hit and not self.isReadOnly():
             sel, word = hit
@@ -407,6 +436,68 @@ class BookEditor(QTextEdit):
         fmt.setPosition(cursor.selectionStart() + 1)
         cursor.insertText(text, fmt.charFormat())
         cursor.endEditBlock()
+
+
+    # ------------------------------------------------------------------ #
+    #  Project notes (highlighted places with comments)
+    # ------------------------------------------------------------------ #
+    def set_note_ranges(self, ranges: list):
+        self._note_ranges = ranges
+        self._rebuild_note_sels()
+
+    def _rebuild_note_sels(self):
+        doc = self.document()
+        sels, blocks = [], set()
+        col = QColor(NOTE_COLOR)
+        col.setAlpha(70)
+        for start, end, _nid, _text in self._note_ranges:
+            c = QTextCursor(doc)
+            c.setPosition(min(start, doc.characterCount() - 1))
+            if end > start:
+                c.setPosition(min(end, doc.characterCount() - 1), QTextCursor.MoveMode.KeepAnchor)
+            else:  # the noted text was deleted: mark the whole paragraph
+                c.movePosition(QTextCursor.MoveOperation.StartOfBlock)
+                c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            s = QTextEdit.ExtraSelection()
+            s.format.setBackground(col)
+            s.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.DotLine)
+            s.format.setUnderlineColor(NOTE_COLOR)
+            s.cursor = c
+            sels.append(s)
+            b = doc.findBlock(c.selectionStart())
+            while b.isValid() and b.position() <= c.selectionEnd():
+                blocks.add(b.blockNumber())
+                b = b.next()
+        self._note_sels = sels
+        self._note_blocks = blocks
+        self._update_extra()
+        self.gutter.update()
+
+    def note_at(self, pos: QPoint):
+        """(id, text) of a note covering the point, if any."""
+        if not self._note_ranges:
+            return None
+        c = self.cursorForPosition(pos)
+        p = c.position()
+        rect = self.cursorRect(c)
+        if abs(rect.center().y() - pos.y()) > rect.height():
+            return None
+        for sel, (_s, _e, nid, text) in zip(self._note_sels, self._note_ranges):
+            if sel.cursor.selectionStart() <= p <= sel.cursor.selectionEnd():
+                return nid, text
+        return None
+
+    def note_span(self) -> tuple[int, int]:
+        """Range for a new note: the selection, or the word / paragraph under the cursor."""
+        c = self.textCursor()
+        if c.hasSelection():
+            return c.selectionStart(), c.selectionEnd()
+        w = QTextCursor(c)
+        w.select(QTextCursor.SelectionType.WordUnderCursor)
+        if w.hasSelection() and w.selectedText().strip():
+            return w.selectionStart(), w.selectionEnd()
+        b = c.block()
+        return b.position(), b.position() + max(0, b.length() - 1)
 
     # ------------------------------------------------------------------ #
     #  Double click: show this paragraph in the other book
@@ -757,7 +848,13 @@ class BookEditor(QTextEdit):
                                   self.viewport())
         else:
             self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
-            QToolTip.hideText()
+            hit = self.note_at(e.position().toPoint()) if not e.buttons() else None
+            if hit:
+                text = html.escape(hit[1] or "(без текста)").replace("\n", "<br>")
+                QToolTip.showText(e.globalPosition().toPoint(),
+                                  f"<div style='max-width:380px'><b>Заметка</b><br>{text}</div>", self.viewport())
+            else:
+                QToolTip.hideText()
 
     def mousePressEvent(self, e):
         self._press_pos = e.position().toPoint()
@@ -776,6 +873,10 @@ class BookEditor(QTextEdit):
         if href:
             ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
             self._open_link(href, e.globalPosition().toPoint(), jump=ctrl)
+            return
+        hit = self.note_at(pos)
+        if hit:
+            self.noteClicked.emit(hit[0])
 
     def _leave_link_format(self):
         """Text typed right after a link must not become part of the link."""
@@ -898,6 +999,7 @@ class BookEditor(QTextEdit):
             col = QColor(pal.highlight().color())
             col.setAlpha(38)
             sels += self._block_selections(self._pair_block, col)
+        sels += self._note_sels
         sels += self._spell_sels
         for c in self._find_selections:
             s = QTextEdit.ExtraSelection()

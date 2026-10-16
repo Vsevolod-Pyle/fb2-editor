@@ -58,6 +58,7 @@ from .dialogs import FB2_FILTER, NewProjectDialog, SaveVersionDialog
 from .editor import STYLES, BookEditor
 from .fb2doc import block_kind, block_path, load_fb2, read_fb2_bytes, save_fb2
 from .projects import SIDES, Project, ProjectStore
+from .notes import NoteDialog, Notes, NotesPanel
 from .spell import Speller
 from .sync import ScrollSync
 
@@ -481,6 +482,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(theme.app_icon())
         self.resize(1400, 860)
 
+        self.notes = Notes(self)
         self._build_actions()
         self._build_ui()
         self.active = self.left.editor
@@ -504,6 +506,10 @@ class MainWindow(QMainWindow):
             ed.noteJumped.connect(lambda: self.statusBar().showMessage(
                 "Переход к сноске. Alt+← — вернуться к тексту", 5000))
             ed.blockDoubleClicked.connect(partial(self.show_in_other, ed))
+            ed.noteClicked.connect(self._note_clicked)
+            ed.noteAddRequested.connect(partial(self._add_note_from, ed))
+            ed.noteEditRequested.connect(self.edit_note)
+            ed.noteDeleteRequested.connect(self.delete_note)
             ed.set_speller(self.speller)
             ed.set_spell_enabled(self.act["spell"].isChecked())
             ed.set_show_numbers(self.act["numbers"].isChecked())
@@ -533,6 +539,8 @@ class MainWindow(QMainWindow):
             elif not self.isMaximized() and (self.width() > avail.width() or self.height() > avail.height()):
                 self.resize(min(self.width(), avail.width()), min(self.height(), avail.height()))
         self.sidebar.setVisible(self.settings.get("sidebar", True))
+        if self.settings.get("notes_panel", False):
+            self.act["notes_panel"].setChecked(True)
         self.act["sidebar"].setChecked(self.sidebar.isVisible())
 
         self.sidebar.refresh(None)
@@ -582,6 +590,10 @@ class MainWindow(QMainWindow):
         add("image", "Вставить картинку…", self.insert_image_file, ["Ctrl+Shift+I"])
         add("paste_plain", "Вставить без форматирования", ed("paste_plain"), ["Ctrl+Shift+V"])
         add("find", "Найти и заменить", self.open_find, ["Ctrl+F", "Ctrl+H"])
+        add("add_note", "Добавить заметку", self.add_note, ["Ctrl+Alt+M"],
+            tip="Заметка к выделенному месту (видна только в проекте)")
+        add("notes_panel", "Заметки", self.toggle_notes_panel, ["Ctrl+Shift+M"], True,
+            "Показать/скрыть список заметок")
         add("find_next", "Найти далее", lambda: self.find_next(False), ["F3"])
         add("find_prev", "Найти назад", lambda: self.find_next(True), ["Shift+F3"])
         add("zoom_in", "Крупнее", lambda: self.change_zoom(1), ["Ctrl++", "Ctrl+=", "Ctrl+Shift++"])
@@ -629,6 +641,9 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
         self.sidebar = Sidebar(self)
         outer.addWidget(self.sidebar)
+        self.notes_panel = NotesPanel(self)
+        self.notes_panel.hide()
+        outer.addWidget(self.notes_panel)
 
         main = QWidget()
         mv = QVBoxLayout(main)
@@ -678,6 +693,8 @@ class MainWindow(QMainWindow):
         t.addWidget(self._tool("image"))
         t.addWidget(hline())
         t.addWidget(self._tool("find"))
+        t.addWidget(self._tool("add_note"))
+        t.addWidget(self._tool("notes_panel"))
         t.addStretch(1)
 
         self.font_box = QFontComboBox()
@@ -794,7 +811,7 @@ class MainWindow(QMainWindow):
                 lambda on: [b[k].setVisible(on) for k in ("sup", "sub")],
                 lambda on: [b[k].setVisible(on) for k in ("clear", "image")],
                 lambda on: [b[k].setVisible(on) for k in ("theme", "numbers", "spell")],
-                lambda on: [b[k].setVisible(on) for k in ("find", "undo", "redo")],
+                lambda on: [b[k].setVisible(on) for k in ("find", "add_note", "undo", "redo")],
             ]
             for step in steps:
                 step(True)
@@ -847,6 +864,11 @@ class MainWindow(QMainWindow):
         self.act["save_version"].setIcon(theme.glyph_icon("save_version", col))
         self.act["image"].setIcon(theme.glyph_icon("image", col))
         self.sidebar.add_btn.setIcon(theme.glyph_icon("add", col))
+        self.act["add_note"].setIcon(theme.glyph_icon("note", col))
+        self.act["notes_panel"].setIcon(theme.glyph_icon("notes", col))
+        self.notes_panel.add_btn.setIcon(theme.glyph_icon("add", col))
+        self.notes_panel.close_btn.setIcon(theme.glyph_icon("close", col))
+        self.notes_panel.refresh()
         self.find_bar.prev_btn.setIcon(theme.glyph_icon("up", col))
         self.find_bar.next_btn.setIcon(theme.glyph_icon("down", col))
         self.find_bar.close_btn.setIcon(theme.glyph_icon("close", col))
@@ -971,6 +993,78 @@ class MainWindow(QMainWindow):
         self.status_pos.setText(f"{self.project.label(ed.side) if self.project else ''}  ·  "
                                 f"курсор: абзац {max(1, k)} из {len(content)}")
 
+
+    # ------------------------------------------------------------------ #
+    #  Notes
+    # ------------------------------------------------------------------ #
+    def toggle_notes_panel(self, on: bool):
+        self.notes_panel.setVisible(on)
+        self.settings["notes_panel"] = on
+        if on:
+            self.notes_panel.refresh()
+
+    def add_note(self):
+        self._add_note_from(self.active)
+
+    def _add_note_from(self, ed: BookEditor):
+        if not self.project or ed.book is None:
+            self.statusBar().showMessage("Откройте книгу, чтобы оставить заметку", 3000)
+            return
+        start, end = ed.note_span()
+        c = QTextCursor(ed.document())
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        dlg = NoteDialog(c.selectedText().replace("\u2029", " "), "", self.project.label(ed.side), self)
+        if dlg.exec() != NoteDialog.DialogCode.Accepted:
+            return
+        n = self.notes.add(ed.side, ed, start, end, dlg.text())
+        if not self.act["notes_panel"].isChecked():
+            self.act["notes_panel"].setChecked(True)
+        self.notes_panel.select(n["id"])
+        self.statusBar().showMessage("Заметка добавлена", 2500)
+
+    def edit_note(self, nid: str):
+        n = self.notes.get(nid)
+        if not n or not self.project:
+            return
+        dlg = NoteDialog(n.get("quote", ""), n.get("text", ""), self.project.label(n["side"]), self)
+        if dlg.exec() == NoteDialog.DialogCode.Accepted:
+            self.notes.edit(nid, dlg.text())
+            self.notes_panel.select(nid)
+
+    def delete_note(self, nid: str):
+        n = self.notes.get(nid)
+        if not n:
+            return
+        preview = (n.get("text") or n.get("quote") or "")[:80]
+        if QMessageBox.question(self, "Удалить заметку", f"Удалить заметку «{preview}»?") == \
+                QMessageBox.StandardButton.Yes:
+            self.notes.remove(nid)
+
+    def goto_note(self, nid: str):
+        n = self.notes.get(nid)
+        if not n:
+            return
+        ed = self.pane(n["side"]).editor
+        r = self.notes.range_of(nid)
+        if ed.book is None or r is None:
+            self.statusBar().showMessage("Книга для этой заметки не открыта", 3000)
+            return
+        doc = ed.document()
+        c = QTextCursor(doc)
+        c.setPosition(r[0])
+        c.setPosition(r[1], QTextCursor.MoveMode.KeepAnchor)
+        ed.setTextCursor(c)
+        rect = doc.documentLayout().blockBoundingRect(c.block())
+        ed.verticalScrollBar().setValue(int(rect.y() - ed.viewport().height() * 0.3))
+        ed.flash_block(c.block().blockNumber())
+        ed.setFocus()
+
+    def _note_clicked(self, nid: str):
+        if not self.act["notes_panel"].isChecked():
+            self.act["notes_panel"].setChecked(True)
+        self.notes_panel.select(nid)
+
     # ------------------------------------------------------------------ #
     #  Reading progress, spelling, numbering, double click
     # ------------------------------------------------------------------ #
@@ -1086,6 +1180,7 @@ class MainWindow(QMainWindow):
         self.content.setCurrentIndex(0)
         self.project_label.setText(p.name)
         self._fit_toolbar()
+        self.notes.set_project(p)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             for side in SIDES:
@@ -1111,6 +1206,7 @@ class MainWindow(QMainWindow):
             pane.title.setText("")
             self.loaded[side] = None
             self._hook_doc(pane)
+            self.notes.attach(side, pane.editor)
             return True
         try:
             doc, book = load_fb2(read_fb2_bytes(self.project.path_of(version)))
@@ -1129,6 +1225,8 @@ class MainWindow(QMainWindow):
         pane.title.setToolTip(book.title)
         self.loaded[side] = version.id
         self._hook_doc(pane)
+        self.notes.attach(side, pane.editor)
+        self.notes.changed.emit()
         return True
 
     def _hook_doc(self, pane: Pane):
@@ -1168,6 +1266,7 @@ class MainWindow(QMainWindow):
             for side in SIDES:
                 self.pane(side).editor.document().setModified(False)
             self.project = None
+            self.notes.set_project(None)
             for side in SIDES:
                 self.pane(side).editor.set_book(None, None)
                 self.loaded[side] = None
@@ -1523,6 +1622,7 @@ class MainWindow(QMainWindow):
                     st[side] = a
             st["active"] = self.active.side
             st["splitter"] = self.splitter.sizes()
+            self.notes.sync_back()
             try:
                 self.project.save_state()
             except OSError:

@@ -268,3 +268,57 @@ def test_spelling_numbers_progress_and_double_click():
     assert abs(shown - (src_rect.y() - L.verticalScrollBar().value())) < 2, shown
     L.document().setModified(False)
     w.close()
+
+
+def test_project_notes():
+    import json
+
+    w, p = _window()
+    L = w.left.editor
+    doc = L.document()
+    block = doc.findBlockByNumber(5)
+    c = QTextCursor(doc)
+    c.setPosition(block.position() + 4)
+    c.setPosition(block.position() + 12, QTextCursor.MoveMode.KeepAnchor)
+    quote = c.selectedText()
+    L.setTextCursor(c)
+    start, end = L.note_span()
+    n = w.notes.add("left", L, start, end, "проверить термин")
+    assert n["quote"] == quote and w.notes_panel.list.count() == 1
+    assert L._note_sels and 5 in L._note_blocks
+
+    # the note follows edits made before it
+    c0 = QTextCursor(doc)
+    c0.setPosition(doc.findBlockByNumber(2).position())
+    c0.insertText("Вставка в начало. ")
+    r = w.notes.range_of(n["id"])
+    c1 = QTextCursor(doc)
+    c1.setPosition(r[0])
+    c1.setPosition(r[1], QTextCursor.MoveMode.KeepAnchor)
+    assert c1.selectedText() == quote
+
+    # stored in project.json only, not in the book
+    w.save_state()
+    data = json.load(open(os.path.join(p.root, "project.json"), encoding="utf-8"))
+    assert data["notes"][0]["text"] == "проверить термин"
+    assert "проверить термин" not in w._serialize("left").decode()
+
+    # reload the original version (without the insertion): the quote is found again
+    L.document().setModified(False)
+    w._load_side("left", p.current("left"))
+    r = w.notes.range_of(n["id"])
+    c2 = QTextCursor(L.document())
+    c2.setPosition(r[0])
+    c2.setPosition(r[1], QTextCursor.MoveMode.KeepAnchor)
+    assert c2.selectedText() == quote
+
+    # jump from the panel
+    L.verticalScrollBar().setValue(L.verticalScrollBar().maximum())
+    w.goto_note(n["id"])
+    assert L.textCursor().selectedText() == quote
+    w.notes.edit(n["id"], "новый текст")
+    assert w.notes.get(n["id"])["text"] == "новый текст"
+    w.notes.remove(n["id"])
+    assert not w.notes.items and not L._note_sels
+    L.document().setModified(False)
+    w.close()

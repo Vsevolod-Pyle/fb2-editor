@@ -64,6 +64,8 @@ GLYPHS = {
     "clear": ("", "⌫"),
     "up": ("", "↑"),
     "down": ("", "↓"),
+    "note": ("\ue70b", "✎"),
+    "notes": ("\ue8fd", "☷"),
 }
 
 _icon_font: str | None = None
@@ -213,6 +215,8 @@ QToolTip {{ background: {c['surface']}; color: {c['text']}; border: 1px solid {c
             padding: 6px 8px; border-radius: 6px; }}
 
 #topBar {{ background: {c['surface']}; border-bottom: 1px solid {c['border']}; }}
+#notesPanel {{ background: {c['surface']}; border-right: 1px solid {c['border']}; }}
+QListWidget#notesList::item {{ border-bottom: 1px solid {c['border']}; border-radius: 6px; }}
 #sidebar {{ background: {c['surface']}; border-right: 1px solid {c['border']}; }}
 #sidebarTitle {{ font-size: 11pt; font-weight: 600; }}
 #muted, QLabel[muted="true"] {{ color: {c['muted']}; }}
