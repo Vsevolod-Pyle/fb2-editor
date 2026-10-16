@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from bisect import bisect_right
 import time
 from functools import partial
 
@@ -57,6 +58,7 @@ from .dialogs import FB2_FILTER, NewProjectDialog, SaveVersionDialog
 from .editor import STYLES, BookEditor
 from .fb2doc import block_kind, block_path, load_fb2, read_fb2_bytes, save_fb2
 from .projects import SIDES, Project, ProjectStore
+from .spell import Speller
 from .sync import ScrollSync
 
 APP_NAME = "FB2 Translation Editor"
@@ -310,6 +312,9 @@ class Pane(QFrame):
         self.dirty.setObjectName("dirty")
         self.dirty.setToolTip("Есть несохранённые изменения")
         self.dirty.hide()
+        self.progress = QLabel("")
+        self.progress.setObjectName("progress")
+        self.progress.setToolTip("Номер абзаца в строке чтения и сколько книги пройдено")
         self.versions = QComboBox()
         self.versions.setObjectName("flat")
         self.versions.setToolTip("Какую версию файла показывать")
@@ -333,6 +338,7 @@ class Pane(QFrame):
         h.addWidget(self.badge)
         h.addWidget(self.title, 1)
         h.addWidget(self.dirty)
+        h.addWidget(self.progress)
         h.addWidget(self.versions)
         h.addWidget(self.menu_btn)
         lay.addWidget(header)
@@ -477,6 +483,12 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_ui()
         self.active = self.left.editor
+        self.speller = Speller(os.path.join(self.store.base, "user_words.txt"), self)
+        self.speller.ready.connect(self._speller_ready)
+        self._progress_timer = QTimer(self)
+        self._progress_timer.setSingleShot(True)
+        self._progress_timer.setInterval(60)
+        self._progress_timer.timeout.connect(self.update_progress)
         self.sync = ScrollSync(self.left.editor, self.right.editor, self)
         self.sync.enabled = bool(self.settings.get("sync", True))
         self.act["sync"].setChecked(self.sync.enabled)
@@ -490,6 +502,12 @@ class MainWindow(QMainWindow):
             ed.verticalScrollBar().rangeChanged.connect(lambda _a, _b: self.middle.update_from_books())
             ed.noteJumped.connect(lambda: self.statusBar().showMessage(
                 "Переход к сноске. Alt+← — вернуться к тексту", 5000))
+            ed.blockDoubleClicked.connect(partial(self.show_in_other, ed))
+            ed.set_speller(self.speller)
+            ed.set_spell_enabled(self.act["spell"].isChecked())
+            ed.set_show_numbers(self.act["numbers"].isChecked())
+            ed.verticalScrollBar().valueChanged.connect(lambda _v: self._progress_timer.start())
+            ed.verticalScrollBar().rangeChanged.connect(lambda _a, _b: self._progress_timer.start())
         self.apply_theme()
         self.apply_view()
 
@@ -573,6 +591,9 @@ class MainWindow(QMainWindow):
         add("align", "Выровнять книги", self.align_now, ["Ctrl+Shift+L"],
             tip="Выровнять вторую книгу по текущей")
         add("theme", "Тёмная тема", self.toggle_theme, ["Ctrl+Shift+D"], True)
+        add("spell", "Проверка орфографии", self.toggle_spell, ["F7"], True,
+            "Проверка орфографии (правый щелчок по слову — варианты исправления)")
+        add("numbers", "Номера абзацев", self.toggle_numbers, ["Ctrl+Shift+N"], True)
         add("save", "Сохранить", self.quick_save, ["Ctrl+S"],
             tip="Быстрое сохранение — перезаписывает один и тот же слот")
         add("save_version", "Сохранить как новую версию…", self.save_version, ["Ctrl+Shift+S"])
@@ -580,6 +601,12 @@ class MainWindow(QMainWindow):
         for key, (label, sc) in STYLES.items():
             add(f"style_{key}", label, partial(self._set_style, key), [sc])
         self.act["theme"].setChecked(self.dark)
+        self.act["spell"].blockSignals(True)
+        self.act["spell"].setChecked(bool(self.settings.get("spell", True)))
+        self.act["spell"].blockSignals(False)
+        self.act["numbers"].blockSignals(True)
+        self.act["numbers"].setChecked(bool(self.settings.get("numbers", True)))
+        self.act["numbers"].blockSignals(False)
 
     def _tool(self, key: str, icon_kind: str | None = None) -> QToolButton:
         b = QToolButton()
@@ -670,6 +697,8 @@ class MainWindow(QMainWindow):
         t.addWidget(self._tool("zoom_in"))
         t.addWidget(hline())
         t.addWidget(self._tool("sync"))
+        t.addWidget(self._tool("spell"))
+        t.addWidget(self._tool("numbers"))
         t.addWidget(self._tool("theme"))
         t.addWidget(hline())
 
@@ -763,7 +792,8 @@ class MainWindow(QMainWindow):
                 lambda on: self.project_label.setVisible(on),
                 lambda on: [b[k].setVisible(on) for k in ("sup", "sub")],
                 lambda on: [b[k].setVisible(on) for k in ("clear", "image")],
-                lambda on: [b[k].setVisible(on) for k in ("theme", "find", "undo", "redo")],
+                lambda on: [b[k].setVisible(on) for k in ("theme", "numbers", "spell")],
+                lambda on: [b[k].setVisible(on) for k in ("find", "undo", "redo")],
             ]
             for step in steps:
                 step(True)
@@ -819,8 +849,13 @@ class MainWindow(QMainWindow):
         self.find_bar.prev_btn.setIcon(theme.glyph_icon("up", col))
         self.find_bar.next_btn.setIcon(theme.glyph_icon("down", col))
         self.find_bar.close_btn.setIcon(theme.glyph_icon("close", col))
+        self.act["spell"].setIcon(theme.text_icon("Аб", col, serif=False, underline_color="#e5484d"))
+        self.act["numbers"].setIcon(theme.text_icon("¶", col))
         for pane in (self.left, self.right):
             pane.menu_btn.setIcon(theme.glyph_icon("more", col))
+            g = pane.editor.gutter
+            g.bg, g.fg, g.current = QColor(c["paper"]), QColor(c["muted"]), QColor(c["accent"])
+            g.update()
             pane.editor._update_extra()
         self._update_color_button()
 
@@ -927,9 +962,71 @@ class MainWindow(QMainWindow):
         if ed.book and other.book:
             other.set_pair_block(self.sync.paired_block(ed, block.blockNumber()))
         ed.set_pair_block(-1)
-        doc = ed.document()
+        if ed.book is None:
+            self.status_pos.setText("")
+            return
+        content = self.sync.index(ed).content
+        k = bisect_right(content, block.blockNumber())
         self.status_pos.setText(f"{self.project.label(ed.side) if self.project else ''}  ·  "
-                                f"абзац {block.blockNumber() + 1} из {doc.blockCount()}")
+                                f"курсор: абзац {max(1, k)} из {len(content)}")
+
+    # ------------------------------------------------------------------ #
+    #  Reading progress, spelling, numbering, double click
+    # ------------------------------------------------------------------ #
+    def update_progress(self):
+        for pane in (self.left, self.right):
+            ed = pane.editor
+            if ed.book is None:
+                pane.progress.setText("")
+                continue
+            idx = self.sync.index(ed)
+            total = len(idx.content)
+            if not total:
+                pane.progress.setText("")
+                continue
+            sb = ed.verticalScrollBar()
+            if sb.value() >= sb.maximum() and sb.maximum() > 0:
+                k = total - 1
+            else:
+                # the first paragraph visible at the top of the page
+                k = self.sync.content_index_at(ed, idx, sb.value() + 4)
+            pct = (k + 1) * 100 / total
+            pane.progress.setText(f"¶ {k + 1} / {total}  ·  {pct:.1f}%".replace(".", ","))
+
+    def _speller_ready(self):
+        if not self.speller.loaded:
+            self.statusBar().showMessage(f"Проверка орфографии недоступна: {self.speller.error}", 8000)
+
+    def toggle_spell(self, on: bool):
+        self.settings["spell"] = on
+        for p in (self.left, self.right):
+            p.editor.set_spell_enabled(on)
+
+    def toggle_numbers(self, on: bool):
+        self.settings["numbers"] = on
+        for p in (self.left, self.right):
+            p.editor.set_show_numbers(on)
+
+    def show_in_other(self, src: BookEditor, number: int):
+        """Double click: bring the matching paragraph of the other book next to this one."""
+        dst = self.right.editor if src is self.left.editor else self.left.editor
+        if src.book is None or dst.book is None:
+            return
+        target = self.sync.paired_block(src, number)
+        if target < 0:
+            return
+        s_doc, d_doc = src.document(), dst.document()
+        s_rect = s_doc.documentLayout().blockBoundingRect(s_doc.findBlockByNumber(number))
+        d_rect = d_doc.documentLayout().blockBoundingRect(d_doc.findBlockByNumber(target))
+        on_screen = s_rect.y() - src.verticalScrollBar().value()
+        on_screen = min(max(0.0, on_screen), dst.viewport().height() * 0.8)
+        self.sync.paused = True
+        try:
+            dst.verticalScrollBar().setValue(int(round(d_rect.y() - on_screen)))
+        finally:
+            self.sync.paused = False
+        dst.set_pair_block(target)
+        dst.flash_block(target)
 
     # ------------------------------------------------------------------ #
     #  Projects
@@ -1035,6 +1132,8 @@ class MainWindow(QMainWindow):
 
     def _hook_doc(self, pane: Pane):
         doc = pane.editor.document()
+        doc.contentsChanged.connect(self._progress_timer.start)
+        self._progress_timer.start()
         doc.modificationChanged.connect(lambda m, p=pane: (p.dirty.setVisible(m), self._update_title()))
         pane.dirty.setVisible(doc.isModified())
 

@@ -201,3 +201,66 @@ def test_footnotes():
     ed.jump_to_block(target)
     assert ed.textCursor().block().blockNumber() == target
     assert ed.go_back() and ed.textCursor().position() == start
+
+
+def _wait_speller(speller, timeout=20000):
+    waited = 0
+    while not speller.loaded and waited < timeout:
+        QTest.qWait(50)
+        waited += 50
+    assert speller.loaded, speller.error
+
+
+def test_spelling_numbers_progress_and_double_click():
+    from fb2editor.spell import Speller
+
+    sp = Speller(os.path.join(tempfile.mkdtemp(), "user_words.txt"))
+    _wait_speller(sp)
+    for w in ("переводчиками", "прочитавшие", "ёлка", "whispered", "Translator", "что-то"):
+        assert sp.check(w), w
+    for w in ("кароко", "переводчиак", "recieve"):
+        assert not sp.check(w), w
+    assert "переводчика" in sp.suggest("переводчиак")
+    sp.add_word("Кароко")
+    assert sp.check("кароко")
+
+    w, p = _window()
+    L, R = w.left.editor, w.right.editor
+    _wait_speller(w.speller)
+    c = L.textCursor()
+    c.setPosition(L.document().findBlockByNumber(2).position())
+    L.setTextCursor(c)
+    L.insertPlainText("Ашибка ")
+    R.setFocus()  # the word being typed is not underlined while the editor has focus
+    L.refresh_spelling()
+    words = [s.cursor.selectedText() for s in L._spell_sels]
+    assert "Ашибка" in words, words
+
+    # paragraph numbering and progress
+    assert L.gutter.width() > 0
+    w.update_progress()
+    assert w.left.progress.text().startswith("¶ 1 / ")
+    L.verticalScrollBar().setValue(L.verticalScrollBar().maximum())
+    app.processEvents()
+    w.update_progress()
+    assert "100,0%" in w.left.progress.text(), w.left.progress.text()
+    total = len(w.sync.index(L).content)
+    assert w.left.progress.text().startswith(f"¶ {total} / {total}")
+
+    # double click on a paragraph shows the matching paragraph in the other book
+    w.sync.enabled = False
+    number = 20
+    src_rect = L.document().documentLayout().blockBoundingRect(L.document().findBlockByNumber(number))
+    L.verticalScrollBar().setValue(int(src_rect.y()) - 100)
+    R.verticalScrollBar().setValue(R.verticalScrollBar().maximum())
+    app.processEvents()
+    w.show_in_other(L, number)
+    app.processEvents()
+    assert R._flash_block == w.sync.paired_block(L, number)
+    target = R.document().findBlockByNumber(R._flash_block)
+    assert target.text().split(" ")[1] == L.document().findBlockByNumber(number).text().split(" ")[1]
+    rect = R.document().documentLayout().blockBoundingRect(target)
+    shown = rect.y() - R.verticalScrollBar().value()
+    assert abs(shown - (src_rect.y() - L.verticalScrollBar().value())) < 2, shown
+    L.document().setModified(False)
+    w.close()

@@ -262,6 +262,7 @@ QListWidget::item:selected {{ background: {c['accent_soft']}; color: {c['text']}
 #badge {{ background: {c['accent_soft']}; color: {c['accent']}; border-radius: 6px; padding: 2px 8px;
           font-weight: 700; font-size: 9pt; }}
 #paneTitle {{ font-weight: 600; }}
+#progress {{ color: {c['muted']}; font-size: 9pt; padding: 0 4px; }}
 #dirty {{ color: {c['dirty']}; font-size: 13pt; }}
 QTextEdit#bookEditor {{ background: {c['paper']}; color: {c['paper_text']}; border: none;
     selection-background-color: {c['selection']}; selection-color: {c['paper_text']}; }}

@@ -7,13 +7,17 @@ import re
 
 import html
 
-from PySide6.QtCore import QMimeData, QPoint, Qt, QUrl, Signal
+from bisect import bisect_left
+
+from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QFont,
     QImage,
+    QFontMetrics,
     QKeyEvent,
+    QPainter,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -28,6 +32,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QToolTip,
     QVBoxLayout,
+    QWidget,
 )
 
 from .fb2doc import (
@@ -43,6 +48,7 @@ from .fb2doc import (
     image_format,
     plain_char_format,
 )
+from .spell import WORD_RE
 
 # Paragraph styles offered in the UI: id -> (label, shortcut)
 STYLES = {
@@ -129,11 +135,63 @@ class NotePopup(QFrame):
         self.show()
 
 
+
+class Gutter(QWidget):
+    """Paragraph numbers drawn in the left margin of the editor."""
+
+    def __init__(self, editor: "BookEditor"):
+        super().__init__(editor)
+        self.editor = editor
+        self.bg = QColor("#fffdf9")
+        self.fg = QColor("#9aa0a8")
+        self.current = QColor("#4f63e8")
+
+    def sizeHint(self):
+        return QSize(self.editor.gutter_width(), 0)
+
+    def paintEvent(self, _e):
+        ed = self.editor
+        p = QPainter(self)
+        p.fillRect(self.rect(), self.bg)
+        if not ed.show_numbers or ed.book is None or ed.sync is None:
+            return
+        doc = ed.document()
+        content = ed.sync.index(ed).content
+        if not content:
+            return
+        f = QFont(self.font())
+        f.setPointSizeF(max(7.0, doc.defaultFont().pointSizeF() * 0.62))
+        p.setFont(f)
+        layout = doc.documentLayout()
+        offset = ed.verticalScrollBar().value()
+        cur = ed.textCursor().blockNumber()
+        first = ed.cursorForPosition(QPoint(0, 0)).block()
+        i = bisect_left(content, first.blockNumber())
+        h = ed.viewport().height()
+        while i < len(content):
+            block = doc.findBlockByNumber(content[i])
+            rect = layout.blockBoundingRect(block)
+            top = rect.y() - offset
+            if top > h:
+                break
+            line_h = rect.height()
+            bl = block.layout()
+            if bl is not None and bl.lineCount():
+                line = bl.lineAt(0)
+                top += line.y()
+                line_h = line.height()
+            p.setPen(self.current if content[i] == cur else self.fg)
+            p.drawText(QRect(0, int(top), self.width() - 8, int(line_h)),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, str(i + 1))
+            i += 1
+
+
 class BookEditor(QTextEdit):
     focused = Signal()
     zoomRequested = Signal(int)
     formatChanged = Signal()
     noteJumped = Signal()
+    blockDoubleClicked = Signal(int)
 
     def __init__(self, side: str, parent=None):
         super().__init__(parent)
@@ -151,6 +209,21 @@ class BookEditor(QTextEdit):
         self._back: list[int] = []
         self._press_pos = None
         self.viewport().setMouseTracking(True)
+        self.speller = None
+        self.spell_enabled = True
+        self._spell_sels: list = []
+        self._flash_block = -1
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.timeout.connect(self._end_flash)
+        self._spell_timer = QTimer(self)
+        self._spell_timer.setSingleShot(True)
+        self._spell_timer.setInterval(120)
+        self._spell_timer.timeout.connect(self.refresh_spelling)
+        self.show_numbers = True
+        self.gutter = Gutter(self)
+        self.verticalScrollBar().valueChanged.connect(self._view_changed)
+        self.cursorPositionChanged.connect(self.gutter.update)
         self.cursorPositionChanged.connect(self.formatChanged)
         self.currentCharFormatChanged.connect(lambda _f: self.formatChanged.emit())
 
@@ -164,11 +237,16 @@ class BookEditor(QTextEdit):
             doc.setPlainText("")
         doc.setParent(self)  # the editor deletes its previous child document itself
         self.setDocument(doc)
+        doc.contentsChanged.connect(self._view_changed)
         self._pair_block = -1
+        self._flash_block = -1
+        self._spell_sels = []
         self._ids_rev = -1
         self._back.clear()
         self._update_extra()
         self.setReadOnly(book is None)
+        self._update_gutter_width()
+        self._view_changed()
 
     def apply_view(self, font: QFont):
         doc = self.document()
@@ -176,6 +254,177 @@ class BookEditor(QTextEdit):
         doc.setDefaultFont(font)
         doc.setDocumentMargin(max(18, int(font.pointSizeF() * 2.4)))
         doc.setModified(modified)
+        self._update_gutter_width()
+        self._view_changed()
+
+    # ------------------------------------------------------------------ #
+    #  Paragraph numbers
+    # ------------------------------------------------------------------ #
+    def gutter_width(self) -> int:
+        if not self.show_numbers or self.book is None:
+            return 0
+        f = QFont(self.font())
+        f.setPointSizeF(max(7.0, self.document().defaultFont().pointSizeF() * 0.62))
+        digits = len(str(max(1, self.document().blockCount())))
+        return QFontMetrics(f).horizontalAdvance("9" * digits) + 14
+
+    def _update_gutter_width(self):
+        w = self.gutter_width()
+        self.setViewportMargins(w, 0, 0, 0)
+        self._place_gutter()
+
+    def _place_gutter(self):
+        cr = self.contentsRect()
+        self.gutter.setGeometry(QRect(cr.left(), cr.top(), self.gutter_width(), cr.height()))
+        self.gutter.update()
+
+    def set_show_numbers(self, on: bool):
+        self.show_numbers = on
+        self._update_gutter_width()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._place_gutter()
+        self._spell_timer.start()
+
+    def _view_changed(self, *_):
+        self.gutter.update()
+        self._spell_timer.start()
+
+    # ------------------------------------------------------------------ #
+    #  Spell checking (only the visible part of the book is checked)
+    # ------------------------------------------------------------------ #
+    def set_speller(self, speller):
+        self.speller = speller
+        speller.ready.connect(self.refresh_spelling)
+        speller.changed.connect(self.refresh_spelling)
+
+    def set_spell_enabled(self, on: bool):
+        self.spell_enabled = on
+        self.refresh_spelling()
+
+    def _visible_blocks(self):
+        doc = self.document()
+        first = self.cursorForPosition(QPoint(0, 0)).block()
+        last = self.cursorForPosition(QPoint(self.viewport().width(), self.viewport().height())).block()
+        b = first.previous() if first.previous().isValid() else first
+        end = last.next().blockNumber() if last.next().isValid() else doc.blockCount() - 1
+        while b.isValid() and b.blockNumber() <= end:
+            yield b
+            b = b.next()
+
+    def refresh_spelling(self):
+        sels = []
+        sp = self.speller
+        if self.spell_enabled and sp is not None and sp.loaded and self.book is not None:
+            cur = self.textCursor().position()
+            fmt = QTextCharFormat()
+            fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
+            fmt.setUnderlineColor(QColor("#e5484d"))
+            for block in self._visible_blocks():
+                if block_kind(block) == "raw":
+                    continue
+                text = block.text()
+                base = block.position()
+                for m in WORD_RE.finditer(text):
+                    start, end = base + m.start(), base + m.end()
+                    if start <= cur <= end and self.hasFocus():
+                        continue  # the word being typed right now
+                    if sp.check(m.group()):
+                        continue
+                    if block.charFormat().isAnchor():
+                        continue
+                    c = QTextCursor(self.document())
+                    c.setPosition(start)
+                    c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+                    if c.charFormat().isAnchor():
+                        continue
+                    s = QTextEdit.ExtraSelection()
+                    s.format = fmt
+                    s.cursor = c
+                    sels.append(s)
+        self._spell_sels = sels
+        self._update_extra()
+
+    def misspelled_at(self, pos: QPoint):
+        """(cursor selecting the word, word) if the word under pos is misspelled."""
+        if not (self.spell_enabled and self.speller and self.speller.loaded):
+            return None
+        c = self.cursorForPosition(pos)
+        block = c.block()
+        off = c.position() - block.position()
+        for m in WORD_RE.finditer(block.text()):
+            if m.start() <= off <= m.end():
+                if self.speller.check(m.group()):
+                    return None
+                sel = QTextCursor(self.document())
+                sel.setPosition(block.position() + m.start())
+                sel.setPosition(block.position() + m.end(), QTextCursor.MoveMode.KeepAnchor)
+                return sel, m.group()
+        return None
+
+    def contextMenuEvent(self, e):
+        menu = self.createStandardContextMenu(e.pos())
+        hit = self.misspelled_at(e.pos())
+        if hit and not self.isReadOnly():
+            sel, word = hit
+            first = menu.actions()[0] if menu.actions() else None
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                suggestions = self.speller.suggest(word)
+            finally:
+                QApplication.restoreOverrideCursor()
+            head = []
+            for sug in suggestions:
+                a = menu.addAction(sug)
+                f = a.font()
+                f.setBold(True)
+                a.setFont(f)
+                a.triggered.connect(lambda _=False, c=sel, t=sug: self._replace_word(c, t))
+                head.append(a)
+            if not suggestions:
+                a = menu.addAction("Нет вариантов")
+                a.setEnabled(False)
+                head.append(a)
+            add = menu.addAction("Добавить в словарь")
+            add.triggered.connect(lambda: self.speller.add_word(word))
+            ign = menu.addAction("Пропустить везде")
+            ign.triggered.connect(lambda: self.speller.ignore(word))
+            head += [add, ign]
+            for a in head:
+                menu.removeAction(a)
+            if first:
+                menu.insertActions(first, head)
+                menu.insertSeparator(first)
+            else:
+                menu.addActions(head)
+        menu.exec(e.globalPos())
+        menu.deleteLater()
+
+    def _replace_word(self, cursor: QTextCursor, text: str):
+        cursor.beginEditBlock()
+        fmt = QTextCursor(cursor)
+        fmt.setPosition(cursor.selectionStart() + 1)
+        cursor.insertText(text, fmt.charFormat())
+        cursor.endEditBlock()
+
+    # ------------------------------------------------------------------ #
+    #  Double click: show this paragraph in the other book
+    # ------------------------------------------------------------------ #
+    def mouseDoubleClickEvent(self, e):
+        super().mouseDoubleClickEvent(e)
+        if e.button() == Qt.MouseButton.LeftButton and self.book is not None:
+            block = self.cursorForPosition(e.position().toPoint()).block()
+            self.blockDoubleClicked.emit(block.blockNumber())
+
+    def flash_block(self, number: int, ms: int = 2600):
+        self._flash_block = number
+        self._update_extra()
+        self._flash_timer.start(ms)
+
+    def _end_flash(self):
+        self._flash_block = -1
+        self._update_extra()
 
     # ------------------------------------------------------------------ #
     #  Character formatting
@@ -620,28 +869,36 @@ class BookEditor(QTextEdit):
         self._find_selections = cursors
         self._update_extra()
 
+    def _block_selections(self, number: int, col: QColor) -> list:
+        block = self.document().findBlockByNumber(number)
+        if not block.isValid():
+            return []
+        s = QTextEdit.ExtraSelection()
+        s.format.setBackground(col)
+        s.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+        c = QTextCursor(block)
+        c.clearSelection()
+        s.cursor = c
+        # full width only covers one line: also tint the whole paragraph text
+        s2 = QTextEdit.ExtraSelection()
+        s2.format.setBackground(col)
+        c2 = QTextCursor(block)
+        c2.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+        s2.cursor = c2
+        return [s, s2]
+
     def _update_extra(self):
         sels = []
         pal = self.palette()
-        if self._pair_block >= 0:
-            block = self.document().findBlockByNumber(self._pair_block)
-            if block.isValid():
-                s = QTextEdit.ExtraSelection()
-                col = QColor(pal.highlight().color())
-                col.setAlpha(38)
-                s.format.setBackground(col)
-                s.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
-                c = QTextCursor(block)
-                c.clearSelection()
-                s.cursor = c
-                sels.append(s)
-                # full width only covers one line: also tint the whole paragraph text
-                s2 = QTextEdit.ExtraSelection()
-                s2.format.setBackground(col)
-                c2 = QTextCursor(block)
-                c2.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
-                s2.cursor = c2
-                sels.append(s2)
+        if self._flash_block >= 0:
+            col = QColor(pal.highlight().color())
+            col.setAlpha(95)
+            sels += self._block_selections(self._flash_block, col)
+        if self._pair_block >= 0 and self._pair_block != self._flash_block:
+            col = QColor(pal.highlight().color())
+            col.setAlpha(38)
+            sels += self._block_selections(self._pair_block, col)
+        sels += self._spell_sels
         for c in self._find_selections:
             s = QTextEdit.ExtraSelection()
             s.format.setBackground(QColor(255, 200, 0, 120))

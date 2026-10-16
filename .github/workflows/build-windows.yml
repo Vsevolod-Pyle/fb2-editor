@@ -31,7 +31,7 @@ jobs:
         run: python -m pytest -q tests
 
       - name: Build exe
-        run: pyinstaller --noconfirm --clean --windowed --name FB2TranslationEditor --icon assets\icon.ico run.pyw
+        run: pyinstaller --noconfirm --clean --windowed --name FB2TranslationEditor --icon assets\icon.ico --add-data "fb2editor\dicts;fb2editor\dicts" --collect-submodules spylls run.pyw
 
       - name: Zip
         shell: pwsh

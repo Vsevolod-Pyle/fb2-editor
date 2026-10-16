@@ -6,7 +6,7 @@ if not exist .venv (
 )
 .venv\Scripts\python -m pip install --upgrade pip
 .venv\Scripts\python -m pip install -r requirements.txt pyinstaller
-.venv\Scripts\pyinstaller --noconfirm --clean --windowed --name FB2TranslationEditor --icon assets\icon.ico run.pyw
+.venv\Scripts\pyinstaller --noconfirm --clean --windowed --name FB2TranslationEditor --icon assets\icon.ico --add-data "fb2editor\dicts;fb2editor\dicts" --collect-submodules spylls run.pyw
 echo.
 echo Done: dist\FB2TranslationEditor\FB2TranslationEditor.exe
 pause
