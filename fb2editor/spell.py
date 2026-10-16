@@ -28,6 +28,7 @@ class Speller(QObject):
         self.user_dict_path = user_dict_path
         self.dicts: dict[str, object] = {}
         self.loaded = False
+        self.done = False  # loading finished (successfully or not)
         self.error = ""
         self._cache: dict[str, bool] = {}
         self.ignored: set[str] = set()
@@ -48,8 +49,11 @@ class Speller(QObject):
                 if os.path.exists(path + ".dic"):
                     self.dicts[lang] = Dictionary.from_files(path)
         except Exception as exc:  # noqa: BLE001
-            self.error = str(exc)
+            self.error = f"{type(exc).__name__}: {exc}"
+        if not self.dicts and not self.error:
+            self.error = f"словари не найдены в {DICT_DIR}"
         self.loaded = bool(self.dicts)
+        self.done = True
         self.ready.emit()
 
     # ------------------------------------------------------------------ #

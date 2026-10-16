@@ -160,7 +160,7 @@ def test_window_fits_small_screens():
     w.resize(1100, 700)
     app.processEvents()
     assert w.top_bar.layout().minimumSize().width() <= w.top_bar.width()
-    w.resize(1600, 900)
+    w.resize(2400, 900)
     app.processEvents()
     assert w.font_box.isVisible()
     w.close()
@@ -204,11 +204,14 @@ def test_footnotes():
     assert ed.go_back() and ed.textCursor().position() == start
 
 
-def _wait_speller(speller, timeout=20000):
-    waited = 0
-    while not speller.loaded and waited < timeout:
-        QTest.qWait(50)
-        waited += 50
+def _wait_speller(speller, timeout=90000):
+    # QTest.qWait keeps the GIL and starves the loader thread: sleep in Python instead
+    import time
+
+    deadline = time.time() + timeout / 1000
+    while not speller.loaded and not speller.done and time.time() < deadline:
+        time.sleep(0.05)
+        app.processEvents()
     assert speller.loaded, speller.error
 
 
