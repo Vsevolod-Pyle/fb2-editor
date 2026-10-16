@@ -315,11 +315,12 @@ class Pane(QFrame):
         self.progress = QLabel("")
         self.progress.setObjectName("progress")
         self.progress.setToolTip("Номер абзаца в строке чтения и сколько книги пройдено")
+        self.progress.setMinimumWidth(1)  # may be clipped in a very narrow window
         self.versions = QComboBox()
         self.versions.setObjectName("flat")
         self.versions.setToolTip("Какую версию файла показывать")
         self.versions.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.versions.setMinimumContentsLength(14)
+        self.versions.setMinimumContentsLength(8)
         self.versions.setMaximumWidth(330)
         self.versions.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.versions.activated.connect(self._version_chosen)
