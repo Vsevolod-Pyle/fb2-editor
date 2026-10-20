@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import QMimeData, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QImage, QTextCursor  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QTextCharFormat, QTextCursor  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
@@ -341,6 +341,66 @@ def test_em_dash_shortcut():
     w.close()
 
 
+def _notes_book(nested: bool) -> bytes:
+    """A book with 3 existing notes; nested=True keeps them inside a 'Примечания' section of the main body."""
+    text = "".join(
+        f'<section><title><p>Глава {c}</p></title><p>Начало главы {c} <a l:href="#n{c}" type="note">[{c}]</a> '
+        f"и продолжение.</p><p>Второй абзац главы {c}.</p></section>" for c in (1, 2, 3))
+    notes = "".join(f'<section id="n{c}"><title><p>{c}</p></title><p>Старое примечание {c}.</p></section>'
+                    for c in (1, 2, 3))
+    if nested:
+        bodies = f"<body>{text}<section><title><p>Примечания</p></title>{notes}</section></body>"
+    else:
+        bodies = f'<body>{text}</body><body name="notes"><title><p>Примечания</p></title>{notes}</body>'
+    return ('<?xml version="1.0" encoding="utf-8"?><FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" '
+            'xmlns:l="http://www.w3.org/1999/xlink"><description><title-info><book-title>N</book-title>'
+            f"</title-info></description>{bodies}</FictionBook>").encode()
+
+
+def test_footnotes_join_existing_notes_and_keep_order():
+    from fb2editor.editor import BookEditor
+    from fb2editor.fb2doc import load_fb2, save_fb2
+    from fb2editor.footnotes import add_footnote, paragraphs_of
+
+    for nested in (False, True):
+        doc, book = load_fb2(_notes_book(nested))
+        ed = BookEditor("left")
+        ed.set_book(doc, book)
+        # select a formatted phrase in chapter 1's second paragraph and make it a note
+        block = next(b for b in (doc.findBlockByNumber(i) for i in range(doc.blockCount()))
+                     if b.text() == "Второй абзац главы 1.")
+        c = QTextCursor(doc)
+        c.setPosition(block.position() + 7)
+        c.setPosition(block.position() + 12, QTextCursor.MoveMode.KeepAnchor)  # "абзац"
+        f = QTextCharFormat()
+        f.setFontItalic(True)
+        c.mergeCharFormat(f)
+        start, end = c.selectionStart(), c.selectionEnd()
+        content = paragraphs_of(doc, start, end)
+        nid, number = add_footnote(ed, start, end, content)
+        assert number == 2, number  # between the old [1] and [2]
+        out = save_fb2(doc, book).decode()
+        # old notes 2 and 3 became 3 and 4
+        assert out.count('type="note">[') == 4
+        for n, target in ((1, "n1"), (2, nid), (3, "n2"), (4, "n3")):
+            assert f'<a l:href="#{target}" type="note">[{n}]</a>' in out, (n, target, nested)
+        # the new note sits in the same container, in reading order, with its italic kept
+        i1, inew, i2 = out.index('<section id="n1">'), out.index(f'<section id="{nid}">'), out.index('<section id="n2">')
+        assert i1 < inew < i2
+        assert out.count("Примечания") == 1
+        new_sec = out[inew:out.index("</section>", inew)]
+        assert "<title>\n<p>2</p>" in new_sec and "<emphasis>абзац</emphasis>" in new_sec, new_sec
+        assert '<section id="n2">\n<title>\n<p>3</p>' in out
+        # a note at the very end of the text gets the last number
+        last = next(b for b in (doc.findBlockByNumber(i) for i in range(doc.blockCount()))
+                    if b.text() == "Второй абзац главы 3.")
+        pos = last.position() + last.length() - 1
+        assert add_footnote(ed, pos, pos, "Последнее.")[1] == 5
+        # undo of the last note restores numbering and sections
+        doc.undo()
+        assert save_fb2(doc, book).decode() == out
+
+
 def test_make_footnote_from_selection():
     from fb2editor.fb2doc import load_fb2, save_fb2
     from fb2editor.footnotes import add_footnote
@@ -355,27 +415,28 @@ def test_make_footnote_from_selection():
     end = c.position()
     start = end - len(" (прим. пер.: игра слов)")
     nid, number = add_footnote(L, start, end, "Прим. пер.: игра слов.")
-    assert (nid, number) == ("n1", 1)
+    assert number == 1
     assert doc.findBlockByNumber(3).text().endswith("[1]")
-    nid2, number2 = add_footnote(L, start, start, "Второе примечание.")
-    assert (nid2, number2) == ("n2", 2)
-    # the notes are shown at the end of the book
-    assert doc.lastBlock().text() == "Второе примечание."
-    title, body = L.note_content("#n1")
-    assert title == "1" and "игра слов" in body
+    # created later but earlier in the text: becomes [1], the first one becomes [2]
+    early = doc.findBlockByNumber(2)
+    nid2, number2 = add_footnote(L, early.position() + 3, early.position() + 3, "Раннее примечание.")
+    assert number2 == 1
+    assert doc.findBlockByNumber(3).text().endswith("[2]")
+    # the notes are shown at the end of the book, in order
+    assert doc.lastBlock().text() == "Прим. пер.: игра слов."
+    title, body = L.note_content("#" + nid)
+    assert title == "2" and "игра слов" in body
 
     out = save_fb2(doc, L.book).decode()
-    assert '<a l:href="#n1" type="note">[1]</a>' in out
-    assert '<body name="notes">' in out and '<section id="n1">' in out and '<section id="n2">' in out
-    assert "Примечания" in out
-    # reopened file: the next footnote continues the numbering in the same notes body
+    assert f'<a l:href="#{nid}" type="note">[2]</a>' in out
+    assert '<body name="notes">' in out and out.index(f'<section id="{nid2}">') < out.index(f'<section id="{nid}">')
+    # reopened file: the notes body is reused
     doc2, book2 = load_fb2(out.encode())
     L.set_book(doc2, book2)
-    assert add_footnote(L, 0, 0, "Третье.")[1] == 3
+    end_pos = doc2.findBlockByNumber(5).position()
+    assert add_footnote(L, end_pos, end_pos, "Третье.")[1] == 3
     assert save_fb2(doc2, book2).decode().count('<body name="notes">') == 1
-
-    # undo removes the link and the note in one step
     doc2.undo()
-    assert '<section id="n3">' not in save_fb2(doc2, book2).decode()
+    assert save_fb2(doc2, book2).decode() == out
     L.document().setModified(False)
     w.close()

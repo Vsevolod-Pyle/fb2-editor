@@ -58,7 +58,7 @@ from .dialogs import FB2_FILTER, NewProjectDialog, SaveVersionDialog
 from .editor import STYLES, BookEditor
 from .fb2doc import block_kind, block_path, load_fb2, read_fb2_bytes, save_fb2
 from .projects import SIDES, Project, ProjectStore
-from .footnotes import add_footnote
+from .footnotes import FootnoteDialog, add_footnote
 from .notes import NoteDialog, Notes, NotesPanel
 from .spell import Speller
 from .sync import ScrollSync
@@ -1023,20 +1023,17 @@ class MainWindow(QMainWindow):
             return
         c = ed.textCursor()
         start, end = c.selectionStart(), c.selectionEnd()
-        selected = c.selectedText().replace("\u2029", "\n").strip()
-        dlg = NoteDialog("", selected, self.project.label(ed.side) if self.project else "", self,
-                         title="Примечание",
-                         placeholder="Текст примечания…  Он будет в конце книги, а в тексте появится ссылка [N].  "
-                                     "(Ctrl+Enter — сохранить)")
-        if dlg.exec() != NoteDialog.DialogCode.Accepted:
+        dlg = FootnoteDialog(c.selection() if c.hasSelection() else None,
+                             self.project.label(ed.side) if self.project else "", self)
+        if dlg.exec() != FootnoteDialog.DialogCode.Accepted:
             return
-        text = dlg.text()
-        if not text:
+        content = dlg.paragraphs()
+        if not content:
             return
-        _nid, number = add_footnote(ed, start, end, text)
+        _nid, number = add_footnote(ed, start, end, content)
         ed.setFocus()
         self.statusBar().showMessage(
-            f"Примечание [{number}] добавлено в конец книги. Наведите на ссылку, чтобы увидеть его", 5000)
+            f"Примечание [{number}] добавлено; примечания пронумерованы по порядку в книге", 5000)
 
     # ------------------------------------------------------------------ #
     #  Notes
