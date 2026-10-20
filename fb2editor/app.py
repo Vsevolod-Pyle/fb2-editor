@@ -505,7 +505,7 @@ class MainWindow(QMainWindow):
             ed.verticalScrollBar().valueChanged.connect(lambda _v: self.middle.update_from_books())
             ed.verticalScrollBar().rangeChanged.connect(lambda _a, _b: self.middle.update_from_books())
             ed.noteJumped.connect(lambda: self.statusBar().showMessage(
-                "Переход к сноске. Alt+← — вернуться к тексту", 5000))
+                "Переход выполнен. Alt+← — вернуться обратно", 5000))
             ed.blockDoubleClicked.connect(partial(self.show_in_other, ed))
             ed.noteClicked.connect(self._note_clicked)
             ed.noteAddRequested.connect(partial(self._add_note_from, ed))

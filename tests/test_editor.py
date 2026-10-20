@@ -11,7 +11,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from fb2editor.app import MainWindow  # noqa: E402
-from fb2editor.fb2doc import read_fb2_bytes  # noqa: E402
+from fb2editor.fb2doc import P_PATH, read_fb2_bytes  # noqa: E402
 from fb2editor.projects import ProjectStore  # noqa: E402
 
 app = QApplication.instance() or QApplication([])
@@ -440,3 +440,28 @@ def test_make_footnote_from_selection():
     assert save_fb2(doc2, book2).decode() == out
     L.document().setModified(False)
     w.close()
+
+
+def test_jump_from_footnote_back_to_text():
+    from fb2editor.editor import BookEditor
+    from fb2editor.fb2doc import load_fb2
+
+    doc, book = load_fb2(_notes_book(False))
+    ed = BookEditor("left")
+    ed.set_book(doc, book)
+    ed.resize(700, 500)
+    ed.show()
+    app.processEvents()
+    blocks = [doc.findBlockByNumber(i) for i in range(doc.blockCount())]
+    note2_title = next(b for b in blocks if b.text() == "2" and "section" in b.blockFormat().property(P_PATH))
+    note2_text = next(b for b in blocks if b.text() == "Старое примечание 2.")
+    link_block = next(b for b in blocks if b.text().startswith("Начало главы 2"))
+    ed.refresh_spelling()
+    # the note number is shown as a link back to the text
+    assert ed._back_titles.get(note2_title.blockNumber()) == "n2"
+    assert ed.footnote_of_block(note2_text) == "n2"
+    c = QTextCursor(note2_text)
+    ed.setTextCursor(c)
+    assert ed.jump_to_reference("n2")
+    assert ed.textCursor().block() == link_block and ed.textCursor().selectedText() == "[2]"
+    assert ed.go_back() and ed.textCursor().block() == note2_text

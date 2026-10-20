@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
 )
 
 from .fb2doc import (
+    LINK_COLOR,
     OBJ,
     P_ID,
     P_KIND,
@@ -220,11 +221,16 @@ class BookEditor(QTextEdit):
         self._ids_rev = -1
         self._ids: dict[str, tuple[int, str | None]] = {}
         self._back: list[int] = []
+        self._last_ref: dict[str, int] = {}
         self._press_pos = None
         self.viewport().setMouseTracking(True)
         self.speller = None
         self.spell_enabled = True
         self._spell_sels: list = []
+        self._back_rev = -1
+        self._backlinks: dict[str, list[int]] = {}
+        self._back_titles: dict[int, str] = {}  # block number of a note's title -> note id
+        self._back_sels: list = []
         self._flash_block = -1
         self._flash_timer = QTimer(self)
         self._flash_timer.setSingleShot(True)
@@ -260,6 +266,10 @@ class BookEditor(QTextEdit):
         self._note_ranges = []
         self._note_sels = []
         self._note_blocks = set()
+        self._back_rev = -1
+        self._back_sels = []
+        self._back_titles = {}
+        self._last_ref = {}
         self._ids_rev = -1
         self._back.clear()
         self._update_extra()
@@ -311,6 +321,102 @@ class BookEditor(QTextEdit):
         self._spell_timer.start()
 
     # ------------------------------------------------------------------ #
+    #  From a footnote back to the place in the text
+    # ------------------------------------------------------------------ #
+    def backlinks(self) -> dict[str, list[int]]:
+        """note id -> positions of the links to it, in reading order."""
+        doc = self.document()
+        if self._back_rev == doc.revision():
+            return self._backlinks
+        ids = self._id_index()
+        out: dict[str, list[int]] = {}
+        b = doc.begin()
+        while b.isValid():
+            it = b.begin()
+            prev_end, prev_id = -1, None
+            while not it.atEnd():
+                fr = it.fragment()
+                it += 1
+                cf = fr.charFormat()
+                href = cf.anchorHref() if cf.isAnchor() else ""
+                if href.startswith("#") and href[1:] in ids:
+                    nid = href[1:]
+                    if not (nid == prev_id and fr.position() == prev_end):  # same link split in pieces
+                        out.setdefault(nid, []).append(fr.position())
+                    prev_end, prev_id = fr.position() + fr.length(), nid
+            b = b.next()
+        titles = {}
+        for nid in out:
+            number, key = ids[nid]
+            if key is None:
+                continue
+            blk = doc.findBlockByNumber(number)
+            while blk.isValid() and key in block_path(blk).split("/"):
+                if block_kind(blk) == "title":
+                    titles[blk.blockNumber()] = nid
+                    break
+                blk = blk.next()
+        self._backlinks, self._back_titles, self._back_rev = out, titles, doc.revision()
+        self._rebuild_back_sels()
+        return out
+
+    def _rebuild_back_sels(self):
+        sels = []
+        doc = self.document()
+        for number in self._back_titles:
+            blk = doc.findBlockByNumber(number)
+            c = QTextCursor(blk)
+            c.movePosition(QTextCursor.MoveOperation.EndOfBlock, QTextCursor.MoveMode.KeepAnchor)
+            s = QTextEdit.ExtraSelection()
+            s.format.setForeground(LINK_COLOR)
+            s.format.setFontUnderline(True)
+            s.cursor = c
+            sels.append(s)
+        self._back_sels = sels
+        self._update_extra()
+
+    def footnote_of_block(self, block) -> str | None:
+        """Id of the footnote whose section contains the block (if something links to it)."""
+        links = self.backlinks()
+        if not links:
+            return None
+        keys = block_path(block).split("/")
+        attrs = self.book.attrs if self.book else {}
+        for k in reversed(keys):
+            nid = attrs.get(k, {}).get("id")
+            if nid and nid in links:
+                return nid
+        pid = block.blockFormat().property(P_ID)
+        return str(pid) if pid and str(pid) in links else None
+
+    def jump_to_reference(self, nid: str) -> bool:
+        """Go from a footnote to the (next) link that points to it."""
+        positions = self.backlinks().get(nid)
+        if not positions:
+            return False
+        cur = self.textCursor().position()
+        # several links to one note: each jump goes to the next one, round and round
+        last = self._last_ref.get(nid)
+        i = (positions.index(last) + 1) % len(positions) if last in positions else 0
+        target = positions[i]
+        self._last_ref[nid] = target
+        self._back.append(cur)
+        self._move_to(target)
+        c = self.textCursor()
+        c.setPosition(target)
+        c.movePosition(QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveMode.KeepAnchor)
+        while c.charFormat().isAnchor() and c.charFormat().anchorHref() == "#" + nid and not c.atBlockEnd():
+            if not c.movePosition(QTextCursor.MoveOperation.NextCharacter, QTextCursor.MoveMode.KeepAnchor):
+                break
+            if c.charFormat().anchorHref() != "#" + nid:
+                c.movePosition(QTextCursor.MoveOperation.PreviousCharacter, QTextCursor.MoveMode.KeepAnchor)
+                break
+        self.setTextCursor(c)
+        self.flash_block(c.block().blockNumber())
+        self.noteJumped.emit()
+        return True
+
+    # ------------------------------------------------------------------ #
     #  Spell checking (only the visible part of the book is checked)
     # ------------------------------------------------------------------ #
     def set_speller(self, speller):
@@ -333,6 +439,8 @@ class BookEditor(QTextEdit):
             b = b.next()
 
     def refresh_spelling(self):
+        if self.book is not None:
+            self.backlinks()  # keeps the footnote-title highlighting up to date
         sels = []
         sp = self.speller
         if self.spell_enabled and sp is not None and sp.loaded and self.book is not None:
@@ -395,6 +503,11 @@ class BookEditor(QTextEdit):
                 if not self.textCursor().hasSelection():
                     self.setTextCursor(self.cursorForPosition(e.pos()))
                 menu.addAction("Добавить заметку…  (Ctrl+Alt+M)", self.noteAddRequested.emit)
+            fn = self.footnote_of_block(self.cursorForPosition(e.pos()).block())
+            if fn:
+                refs = len(self.backlinks().get(fn, []))
+                menu.addAction("← К месту в тексте, где стоит эта сноска" + (f" ({refs} ссылки)" if refs > 1 else ""),
+                               lambda: self.jump_to_reference(fn))
             if not self.isReadOnly():
                 menu.addAction("Сделать примечанием…  (Ctrl+Alt+F)" if self.textCursor().hasSelection()
                                else "Вставить примечание…  (Ctrl+Alt+F)", self.footnoteRequested.emit)
@@ -850,6 +963,11 @@ class BookEditor(QTextEdit):
             elif href.startswith("http"):
                 QToolTip.showText(e.globalPosition().toPoint(), f"{href}<br><i>Ctrl+щелчок — открыть</i>",
                                   self.viewport())
+        elif self._back_titles and self._on_text(e.position().toPoint()) and \
+                self.cursorForPosition(e.position().toPoint()).blockNumber() in self._back_titles:
+            self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
+            QToolTip.showText(e.globalPosition().toPoint(), "Щелчок — к месту в тексте, где стоит эта сноска",
+                              self.viewport())
         else:
             self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
             hit = self.note_at(e.position().toPoint()) if not e.buttons() else None
@@ -859,6 +977,21 @@ class BookEditor(QTextEdit):
                                   f"<div style='max-width:380px'><b>Заметка</b><br>{text}</div>", self.viewport())
             else:
                 QToolTip.hideText()
+
+    def _on_text(self, pos: QPoint) -> bool:
+        """True if the point is over the text of a line, not the empty space beside it."""
+        c = self.cursorForPosition(pos)
+        block = c.block()
+        layout = block.layout()
+        if layout is None or not layout.lineCount():
+            return False
+        rect = self.document().documentLayout().blockBoundingRect(block)
+        y = pos.y() + self.verticalScrollBar().value() - rect.y()
+        line = layout.lineForTextPosition(c.position() - block.position())
+        if not line.isValid() or not (line.y() <= y <= line.y() + line.height()):
+            return False
+        x = pos.x() + self.horizontalScrollBar().value() - rect.x()
+        return line.x() - 4 <= x <= line.x() + line.naturalTextWidth() + 4
 
     def mousePressEvent(self, e):
         self._press_pos = e.position().toPoint()
@@ -877,6 +1010,13 @@ class BookEditor(QTextEdit):
         if href:
             ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
             self._open_link(href, e.globalPosition().toPoint(), jump=ctrl)
+            return
+        block = self.cursorForPosition(pos).block()
+        ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        nid = self._back_titles.get(block.blockNumber()) if self._on_text(pos) else None
+        if nid is None and ctrl:
+            nid = self.footnote_of_block(block)
+        if nid and self.jump_to_reference(nid):
             return
         hit = self.note_at(pos)
         if hit:
@@ -1003,6 +1143,7 @@ class BookEditor(QTextEdit):
             col = QColor(pal.highlight().color())
             col.setAlpha(38)
             sels += self._block_selections(self._pair_block, col)
+        sels += self._back_sels
         sels += self._note_sels
         sels += self._spell_sels
         for c in self._find_selections:
