@@ -38,14 +38,15 @@ SEARCH_RADIUS = 80  # paragraphs searched around the old place when re-anchoring
 
 
 class NoteDialog(QDialog):
-    def __init__(self, quote: str, text: str = "", label: str = "", parent=None):
+    def __init__(self, quote: str, text: str = "", label: str = "", parent=None,
+                 title: str = "Заметка", placeholder: str = "Комментарий…  (Ctrl+Enter — сохранить)"):
         super().__init__(parent)
-        self.setWindowTitle("Заметка")
+        self.setWindowTitle(title)
         self.setMinimumWidth(460)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 18)
         lay.setSpacing(10)
-        head = QLabel("Заметка" + (f" · {label}" if label else ""))
+        head = QLabel(title + (f" · {label}" if label else ""))
         head.setStyleSheet("font-size: 13pt; font-weight: 700;")
         lay.addWidget(head)
         if quote:
@@ -54,7 +55,7 @@ class NoteDialog(QDialog):
             q.setWordWrap(True)
             lay.addWidget(q)
         self.edit = QPlainTextEdit(text)
-        self.edit.setPlaceholderText("Комментарий…  (Ctrl+Enter — сохранить)")
+        self.edit.setPlaceholderText(placeholder)
         self.edit.setMinimumHeight(120)
         lay.addWidget(self.edit)
         row = QHBoxLayout()

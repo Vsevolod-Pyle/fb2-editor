@@ -202,6 +202,7 @@ class BookEditor(QTextEdit):
     blockDoubleClicked = Signal(int)
     noteClicked = Signal(str)
     noteAddRequested = Signal()
+    footnoteRequested = Signal()
     noteEditRequested = Signal(str)
     noteDeleteRequested = Signal(str)
 
@@ -394,6 +395,9 @@ class BookEditor(QTextEdit):
                 if not self.textCursor().hasSelection():
                     self.setTextCursor(self.cursorForPosition(e.pos()))
                 menu.addAction("Добавить заметку…  (Ctrl+Alt+M)", self.noteAddRequested.emit)
+            if not self.isReadOnly():
+                menu.addAction("Сделать примечанием…  (Ctrl+Alt+F)" if self.textCursor().hasSelection()
+                               else "Вставить примечание…  (Ctrl+Alt+F)", self.footnoteRequested.emit)
         hit = self.misspelled_at(e.pos())
         if hit and not self.isReadOnly():
             sel, word = hit

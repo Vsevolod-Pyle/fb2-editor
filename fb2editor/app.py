@@ -58,6 +58,7 @@ from .dialogs import FB2_FILTER, NewProjectDialog, SaveVersionDialog
 from .editor import STYLES, BookEditor
 from .fb2doc import block_kind, block_path, load_fb2, read_fb2_bytes, save_fb2
 from .projects import SIDES, Project, ProjectStore
+from .footnotes import add_footnote
 from .notes import NoteDialog, Notes, NotesPanel
 from .spell import Speller
 from .sync import ScrollSync
@@ -508,6 +509,7 @@ class MainWindow(QMainWindow):
             ed.blockDoubleClicked.connect(partial(self.show_in_other, ed))
             ed.noteClicked.connect(self._note_clicked)
             ed.noteAddRequested.connect(partial(self._add_note_from, ed))
+            ed.footnoteRequested.connect(partial(self._footnote_from, ed))
             ed.noteEditRequested.connect(self.edit_note)
             ed.noteDeleteRequested.connect(self.delete_note)
             ed.set_speller(self.speller)
@@ -590,6 +592,10 @@ class MainWindow(QMainWindow):
         add("image", "Вставить картинку…", self.insert_image_file, ["Ctrl+Shift+I"])
         add("paste_plain", "Вставить без форматирования", ed("paste_plain"), ["Ctrl+Shift+V"])
         add("find", "Найти и заменить", self.open_find, ["Ctrl+F", "Ctrl+H"])
+        add("dash", "Длинное тире", lambda: self.insert_text("—"), ["Ctrl+Shift+-", "Ctrl+_", "Ctrl+Shift+_"],
+            tip="Длинное тире —")
+        add("footnote", "Примечание", self.make_footnote, ["Ctrl+Alt+F"],
+            tip="Сделать выделенный текст примечанием (сноской в конце книги)")
         add("add_note", "Добавить заметку", self.add_note, ["Ctrl+Alt+M"],
             tip="Заметка к выделенному месту (видна только в проекте)")
         add("notes_panel", "Заметки", self.toggle_notes_panel, ["Ctrl+Shift+M"], True,
@@ -689,6 +695,8 @@ class MainWindow(QMainWindow):
         self.color_menu = QMenu(self)
         self.color_btn.setMenu(self.color_menu)
         t.addWidget(self.color_btn)
+        t.addWidget(self._tool("dash"))
+        t.addWidget(self._tool("footnote"))
         t.addWidget(self._tool("clear"))
         t.addWidget(self._tool("image"))
         t.addWidget(hline())
@@ -810,6 +818,7 @@ class MainWindow(QMainWindow):
                 lambda on: self.project_label.setVisible(on),
                 lambda on: [b[k].setVisible(on) for k in ("sup", "sub")],
                 lambda on: [b[k].setVisible(on) for k in ("clear", "image")],
+                lambda on: [b[k].setVisible(on) for k in ("footnote",)],
                 lambda on: [b[k].setVisible(on) for k in ("theme", "numbers", "spell")],
                 lambda on: [b[k].setVisible(on) for k in ("find", "add_note", "undo", "redo")],
             ]
@@ -865,6 +874,8 @@ class MainWindow(QMainWindow):
         self.act["image"].setIcon(theme.glyph_icon("image", col))
         self.sidebar.add_btn.setIcon(theme.glyph_icon("add", col))
         self.act["add_note"].setIcon(theme.glyph_icon("note", col))
+        self.act["dash"].setIcon(theme.text_icon("—", col, serif=False))
+        self.act["footnote"].setIcon(theme.text_icon("[1]", col, serif=False, size=40))
         self.act["notes_panel"].setIcon(theme.glyph_icon("notes", col))
         self.notes_panel.add_btn.setIcon(theme.glyph_icon("add", col))
         self.notes_panel.close_btn.setIcon(theme.glyph_icon("close", col))
@@ -993,6 +1004,39 @@ class MainWindow(QMainWindow):
         self.status_pos.setText(f"{self.project.label(ed.side) if self.project else ''}  ·  "
                                 f"курсор: абзац {max(1, k)} из {len(content)}")
 
+
+    # ------------------------------------------------------------------ #
+    #  Typing helpers and footnotes
+    # ------------------------------------------------------------------ #
+    def insert_text(self, text: str):
+        ed = self.active
+        if ed.book is None or ed.isReadOnly():
+            return
+        ed.insertPlainText(text)
+        ed.setFocus()
+
+    def make_footnote(self):
+        self._footnote_from(self.active)
+
+    def _footnote_from(self, ed: BookEditor):
+        if ed.book is None or ed.isReadOnly():
+            return
+        c = ed.textCursor()
+        start, end = c.selectionStart(), c.selectionEnd()
+        selected = c.selectedText().replace("\u2029", "\n").strip()
+        dlg = NoteDialog("", selected, self.project.label(ed.side) if self.project else "", self,
+                         title="Примечание",
+                         placeholder="Текст примечания…  Он будет в конце книги, а в тексте появится ссылка [N].  "
+                                     "(Ctrl+Enter — сохранить)")
+        if dlg.exec() != NoteDialog.DialogCode.Accepted:
+            return
+        text = dlg.text()
+        if not text:
+            return
+        _nid, number = add_footnote(ed, start, end, text)
+        ed.setFocus()
+        self.statusBar().showMessage(
+            f"Примечание [{number}] добавлено в конец книги. Наведите на ссылку, чтобы увидеть его", 5000)
 
     # ------------------------------------------------------------------ #
     #  Notes

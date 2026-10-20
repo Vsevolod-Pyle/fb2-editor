@@ -322,3 +322,60 @@ def test_project_notes():
     assert not w.notes.items and not L._note_sels
     L.document().setModified(False)
     w.close()
+
+
+def test_em_dash_shortcut():
+    w, _p = _window()
+    L = w.left.editor
+    L.setFocus()
+    w._set_active(L)
+    c = L.textCursor()
+    c.setPosition(L.document().findBlockByNumber(2).position())
+    L.setTextCursor(c)
+    QTest.keyClick(L, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    QTest.keyClick(L, Qt.Key.Key_Underscore, Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier)
+    assert L.document().findBlockByNumber(2).text().startswith("——")
+    w.act["dash"].trigger()
+    assert L.document().findBlockByNumber(2).text().startswith("———")
+    L.document().setModified(False)
+    w.close()
+
+
+def test_make_footnote_from_selection():
+    from fb2editor.fb2doc import load_fb2, save_fb2
+    from fb2editor.footnotes import add_footnote
+
+    w, _p = _window()
+    L = w.left.editor
+    doc = L.document()
+    block = doc.findBlockByNumber(3)
+    c = QTextCursor(doc)
+    c.setPosition(block.position() + block.length() - 1)
+    c.insertText(" (прим. пер.: игра слов)")
+    end = c.position()
+    start = end - len(" (прим. пер.: игра слов)")
+    nid, number = add_footnote(L, start, end, "Прим. пер.: игра слов.")
+    assert (nid, number) == ("n1", 1)
+    assert doc.findBlockByNumber(3).text().endswith("[1]")
+    nid2, number2 = add_footnote(L, start, start, "Второе примечание.")
+    assert (nid2, number2) == ("n2", 2)
+    # the notes are shown at the end of the book
+    assert doc.lastBlock().text() == "Второе примечание."
+    title, body = L.note_content("#n1")
+    assert title == "1" and "игра слов" in body
+
+    out = save_fb2(doc, L.book).decode()
+    assert '<a l:href="#n1" type="note">[1]</a>' in out
+    assert '<body name="notes">' in out and '<section id="n1">' in out and '<section id="n2">' in out
+    assert "Примечания" in out
+    # reopened file: the next footnote continues the numbering in the same notes body
+    doc2, book2 = load_fb2(out.encode())
+    L.set_book(doc2, book2)
+    assert add_footnote(L, 0, 0, "Третье.")[1] == 3
+    assert save_fb2(doc2, book2).decode().count('<body name="notes">') == 1
+
+    # undo removes the link and the note in one step
+    doc2.undo()
+    assert '<section id="n3">' not in save_fb2(doc2, book2).decode()
+    L.document().setModified(False)
+    w.close()
