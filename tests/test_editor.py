@@ -157,6 +157,8 @@ def test_window_fits_small_screens():
     w, _p = _window()
     # must fit a 1280px-wide screen (fonts on Windows are wider than on Linux)
     assert w.minimumSizeHint().width() <= 1150, w.minimumSizeHint()
+    # hidden pages (the welcome screen) must not make the window wider than the books need
+    assert w.content.minimumSizeHint().width() <= w.splitter.minimumSizeHint().width() + 40
     w.resize(1100, 700)
     app.processEvents()
     assert w.top_bar.layout().minimumSize().width() <= w.top_bar.width()
