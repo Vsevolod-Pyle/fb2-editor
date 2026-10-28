@@ -95,6 +95,15 @@ class Project:
         self.save()
 
     @property
+    def single(self) -> bool:
+        """One-book project (no side-by-side comparison)."""
+        return self.data.get("mode") == "single"
+
+    def set_single(self, on: bool):
+        self.data["mode"] = "single" if on else "pair"
+        self.save_state()
+
+    @property
     def state(self) -> dict:
         return self.data.setdefault("state", {})
 
@@ -246,7 +255,7 @@ class ProjectStore:
         except (OSError, ValueError):
             return None
 
-    def create(self, name: str, left_label="RU", right_label="EN") -> Project:
+    def create(self, name: str, left_label="RU", right_label="EN", mode: str = "pair") -> Project:
         pid = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         root = os.path.join(self.dir, pid)
         os.makedirs(root)
@@ -258,6 +267,7 @@ class ProjectStore:
                 "right": {"label": right_label, "versions": [], "current": None},
             },
             "state": {},
+            "mode": mode,
         })
         p.save()
         return p

@@ -144,6 +144,10 @@ class Sidebar(QFrame):
         self.add_btn = QToolButton()
         self.add_btn.setToolTip("Новый проект (Ctrl+N)")
         self.add_btn.clicked.connect(win.new_project)
+        self.open_btn = QToolButton()
+        self.open_btn.setToolTip("Открыть книгу FB2 (Ctrl+O)")
+        self.open_btn.clicked.connect(win.open_book)
+        head.addWidget(self.open_btn)
         head.addWidget(self.add_btn)
         lay.addLayout(head)
         self.list = QListWidget()
@@ -287,6 +291,19 @@ class MiddleBar(QFrame):
 # --------------------------------------------------------------------------- #
 
 
+class ElasticCombo(QComboBox):
+    """Combo box that shows its full text when there is room but may shrink in narrow windows."""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        fm = self.fontMetrics()
+        text = self.currentText()
+        return QSize(min(self.maximumWidth(), max(hint.width(), fm.horizontalAdvance(text) + 48)), hint.height())
+
+    def minimumSizeHint(self):
+        return QSize(90, super().minimumSizeHint().height())
+
+
 class Pane(QFrame):
     def __init__(self, win, side: str):
         super().__init__()
@@ -308,8 +325,8 @@ class Pane(QFrame):
         self.badge.installEventFilter(self)
         self.title = QLabel("")
         self.title.setObjectName("paneTitle")
-        self.title.setMinimumWidth(0)
-        self.title.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.title.setMinimumWidth(1)  # long titles are clipped, other header items keep their size
+        self.title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.dirty = QLabel("●")
         self.dirty.setObjectName("dirty")
         self.dirty.setToolTip("Есть несохранённые изменения")
@@ -318,7 +335,7 @@ class Pane(QFrame):
         self.progress.setObjectName("progress")
         self.progress.setToolTip("Номер абзаца в строке чтения и сколько книги пройдено")
         self.progress.setMinimumWidth(1)  # may be clipped in a very narrow window
-        self.versions = QComboBox()
+        self.versions = ElasticCombo()
         self.versions.setObjectName("flat")
         self.versions.setToolTip("Какую версию файла показывать")
         self.versions.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
@@ -326,6 +343,7 @@ class Pane(QFrame):
         self.versions.setMaximumWidth(330)
         self.versions.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.versions.activated.connect(self._version_chosen)
+        self.versions.currentIndexChanged.connect(lambda _i: self.versions.updateGeometry())
         self.menu_btn = QToolButton()
         self.menu_btn.setToolTip("Действия с файлом")
         self.menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -391,6 +409,7 @@ class Pane(QFrame):
             self.versions.setVisible(bool(vs))
             self.badge.setText(project.label(self.side))
         self.versions.blockSignals(False)
+        self.versions.updateGeometry()
 
     def _version_chosen(self, index: int):
         vid = self.versions.itemData(index)
@@ -577,6 +596,10 @@ class MainWindow(QMainWindow):
         ed = lambda name, *args: (lambda *_: getattr(self.active, name)(*args))  # noqa: E731
         add("sidebar", "Проекты", self.toggle_sidebar, ["Ctrl+\\"], True, "Показать/скрыть список проектов")
         add("new", "Новый проект", self.new_project, ["Ctrl+N"])
+        add("open_book", "Открыть книгу…", self.open_book, ["Ctrl+O"],
+            tip="Открыть любую книгу FB2 для чтения и правки")
+        add("two_books", "Две книги", self.toggle_two_books, ["Ctrl+Shift+2"], True,
+            "Две книги рядом (оригинал и перевод) / одна книга")
         add("undo", "Отменить", ed("undo"), ["Ctrl+Z"])
         add("redo", "Повторить", ed("redo"), ["Ctrl+Y", "Ctrl+Shift+Z"])
         add("bold", "Жирный", ed("toggle_bold"), ["Ctrl+B"], tip="Жирный")
@@ -722,6 +745,7 @@ class MainWindow(QMainWindow):
         t.addWidget(self.zoom_label)
         t.addWidget(self._tool("zoom_in"))
         t.addWidget(hline())
+        t.addWidget(self._tool("two_books"))
         t.addWidget(self._tool("sync"))
         t.addWidget(self._tool("spell"))
         t.addWidget(self._tool("numbers"))
@@ -767,17 +791,20 @@ class MainWindow(QMainWindow):
         welcome.setObjectName("welcome")
         wl = QVBoxLayout(welcome)
         wl.addStretch(2)
-        title = QLabel("Редактор перевода FB2")
+        title = QLabel("Редактор книг FB2")
         title.setObjectName("welcomeTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        text = QLabel("Откройте оригинал и перевод рядом, листайте их синхронно\n"
-                      "и правьте текст прямо в книге — как в обычной читалке.")
+        text = QLabel("Откройте любую книгу FB2 и правьте её прямо в тексте — как в обычной читалке.\n"
+                      "Или поставьте оригинал и перевод рядом и листайте их синхронно.")
         text.setObjectName("welcomeText")
         text.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        btn = QPushButton("Создать проект")
+        btn = QPushButton("Открыть книгу…")
         btn.setObjectName("primary")
         btn.setMinimumWidth(200)
-        btn.clicked.connect(self.new_project)
+        btn.clicked.connect(self.open_book)
+        btn2 = QPushButton("Оригинал и перевод…")
+        btn2.setMinimumWidth(200)
+        btn2.clicked.connect(self.new_project)
         wl.addWidget(title)
         wl.addSpacing(8)
         wl.addWidget(text)
@@ -785,6 +812,8 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addStretch(1)
         row.addWidget(btn)
+        row.addSpacing(8)
+        row.addWidget(btn2)
         row.addStretch(1)
         wl.addLayout(row)
         wl.addStretch(3)
@@ -873,6 +902,8 @@ class MainWindow(QMainWindow):
         self.act["save_version"].setIcon(theme.glyph_icon("save_version", col))
         self.act["image"].setIcon(theme.glyph_icon("image", col))
         self.sidebar.add_btn.setIcon(theme.glyph_icon("add", col))
+        self.sidebar.open_btn.setIcon(theme.glyph_icon("open", col))
+        self.act["two_books"].setIcon(theme.pair_icon(col))
         self.act["add_note"].setIcon(theme.glyph_icon("note", col))
         self.act["dash"].setIcon(theme.text_icon("—", col, serif=False))
         self.act["footnote"].setIcon(theme.text_icon("[1]", col, serif=False, size=40))
@@ -993,7 +1024,7 @@ class MainWindow(QMainWindow):
             return
         other = self.right.editor if ed is self.left.editor else self.left.editor
         block = ed.textCursor().block()
-        if ed.book and other.book:
+        if ed.book and other.book and not (self.project and self.project.single):
             other.set_pair_block(self.sync.paired_block(ed, block.blockNumber()))
         ed.set_pair_block(-1)
         if ed.book is None:
@@ -1128,6 +1159,7 @@ class MainWindow(QMainWindow):
                 k = self.sync.content_index_at(ed, idx, sb.value() + 4)
             pct = (k + 1) * 100 / total
             pane.progress.setText(f"¶ {k + 1} / {total}  ·  {pct:.1f}%".replace(".", ","))
+            pane.progress.updateGeometry()
 
     def _speller_ready(self):
         if not self.speller.loaded:
@@ -1146,7 +1178,7 @@ class MainWindow(QMainWindow):
     def show_in_other(self, src: BookEditor, number: int):
         """Double click: bring the matching paragraph of the other book next to this one."""
         dst = self.right.editor if src is self.left.editor else self.left.editor
-        if src.book is None or dst.book is None:
+        if src.book is None or dst.book is None or (self.project and self.project.single):
             return
         target = self.sync.paired_block(src, number)
         if target < 0:
@@ -1169,6 +1201,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     def _show_welcome(self):
         self.content.setCurrentIndex(1)
+        self.apply_mode()
         self.project_label.setText("")
         self._update_title()
 
@@ -1185,9 +1218,11 @@ class MainWindow(QMainWindow):
         if not self.maybe_save():
             return
         p = self.store.create(dlg.name.text().strip(), dlg.left_label.text().strip() or "RU",
-                              dlg.right_label.text().strip() or "EN")
+                              dlg.right_label.text().strip() or "EN", mode=dlg.mode())
         for side, picker in (("left", dlg.left_file), ("right", dlg.right_file)):
             path = picker.text().strip()
+            if side == "right" and dlg.mode() == "single":
+                continue
             if path:
                 try:
                     data = read_fb2_bytes(path)
@@ -1198,6 +1233,67 @@ class MainWindow(QMainWindow):
                 p.import_file(side, path, data)
                 self._remember_dir(path)
         self._open(p)
+
+    def open_book(self):
+        """Open any FB2 as a one-book project (or the project made from it earlier)."""
+        path, _ = QFileDialog.getOpenFileName(self, "Открыть книгу", self._start_dir(), FB2_FILTER)
+        if not path:
+            return
+        self._remember_dir(path)
+        same = os.path.normcase(os.path.abspath(path))
+        for p in self.store.list():
+            for side in SIDES:
+                for v in p.versions(side):
+                    if v.source and os.path.normcase(os.path.abspath(v.source)) == same:
+                        if not self.open_project(p.id):
+                            return
+                        self.statusBar().showMessage("Эта книга уже открывалась — открыт её проект", 4000)
+                        return
+        try:
+            data = read_fb2_bytes(path)
+            _doc, book = load_fb2(data)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, APP_NAME, f"Не удалось открыть {path}:\n{exc}")
+            return
+        if not self.maybe_save():
+            return
+        name = book.title or os.path.splitext(os.path.basename(path))[0]
+        label = (book.lang or "").upper()[:6] or "КНИГА"
+        p = self.store.create(name, label, "EN" if label != "EN" else "RU", mode="single")
+        p.import_file("left", path, data)
+        self._open(p)
+
+    def toggle_two_books(self, on: bool):
+        if not self.project:
+            self.act["two_books"].blockSignals(True)
+            self.act["two_books"].setChecked(False)
+            self.act["two_books"].blockSignals(False)
+            return
+        self.project.set_single(not on)
+        self.apply_mode()
+        if on and self.right.editor.book is None:
+            self.statusBar().showMessage("Справа можно открыть вторую книгу — оригинал или перевод", 5000)
+        elif on:
+            self.sync.align(self.left.editor)
+
+    def apply_mode(self):
+        """Show one book or two books side by side."""
+        single = bool(self.project and self.project.single)
+        self.right.setVisible(not single)
+        self.middle.setVisible(not single)
+        for key in ("sync", "align"):
+            self.act[key].setEnabled(not single)
+        if "sync" in self._tool_btns:
+            self._tool_btns["sync"].setVisible(not single)
+        self.find_bar.both.setVisible(not single)
+        self.act["two_books"].blockSignals(True)
+        self.act["two_books"].setChecked(bool(self.project) and not single)
+        self.act["two_books"].blockSignals(False)
+        if single:
+            self.left.editor.set_pair_block(-1)
+            if self.active is self.right.editor:
+                self.active = self.left.editor
+                self.left.editor.setFocus()
 
     def open_project(self, pid: str) -> bool:
         if self.project and self.project.id == pid:
@@ -1232,6 +1328,7 @@ class MainWindow(QMainWindow):
         sizes = p.state.get("splitter")
         if sizes and len(sizes) == 3:
             self.splitter.setSizes(sizes)
+        self.apply_mode()
         QTimer.singleShot(30, self._restore_positions)
         self._update_title()
 
@@ -1540,7 +1637,7 @@ class MainWindow(QMainWindow):
         return f
 
     def _find_targets(self):
-        if self.find_bar.both.isChecked():
+        if self.find_bar.both.isChecked() and not (self.project and self.project.single):
             return [p.editor for p in (self.left, self.right) if p.editor.book]
         return [self.active] if self.active.book else []
 

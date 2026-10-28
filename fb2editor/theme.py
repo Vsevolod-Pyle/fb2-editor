@@ -151,6 +151,21 @@ def script_icon(sup: bool, color: str, size=40) -> QIcon:
     return QIcon(pm)
 
 
+def pair_icon(color: str, size=40) -> QIcon:
+    """Two pages side by side: the 'two books' switch."""
+    pm = _canvas(size)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(QColor(color), size * 0.06))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    w, h = size * 0.27, size * 0.5
+    top = (size - h) / 2
+    p.drawRoundedRect(QRectF(size * 0.2, top, w, h), 2, 2)
+    p.drawRoundedRect(QRectF(size * 0.53, top, w, h), 2, 2)
+    p.end()
+    return QIcon(pm)
+
+
 def swatch_icon(color: str | None, border: str, size=20) -> QIcon:
     pm = _canvas(size)
     p = QPainter(pm)

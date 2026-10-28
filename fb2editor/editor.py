@@ -297,14 +297,28 @@ class BookEditor(QTextEdit):
         digits = len(str(max(1, self.document().blockCount())))
         return QFontMetrics(f).horizontalAdvance("9" * digits) + 22
 
+    MAX_COLUMN_CHARS = 80  # wide windows: keep lines readable, centre the text column
+
+    def _side_space(self, gutter: int) -> int:
+        doc = self.document()
+        fm = QFontMetrics(doc.defaultFont())
+        column = fm.averageCharWidth() * self.MAX_COLUMN_CHARS + 2 * doc.documentMargin()
+        avail = self.contentsRect().width() - gutter - self.verticalScrollBar().sizeHint().width()
+        return max(0, int((avail - column) / 2))
+
     def _update_gutter_width(self):
         w = self.gutter_width()
-        self.setViewportMargins(w, 0, 0, 0)
+        extra = self._side_space(w)
+        m = self.viewportMargins()
+        if (m.left(), m.right()) != (w + extra, extra):
+            self.setViewportMargins(w + extra, 0, extra, 0)
         self._place_gutter()
 
     def _place_gutter(self):
         cr = self.contentsRect()
-        self.gutter.setGeometry(QRect(cr.left(), cr.top(), self.gutter_width(), cr.height()))
+        w = self.gutter_width()
+        left = self.viewportMargins().left() - w
+        self.gutter.setGeometry(QRect(cr.left() + left, cr.top(), w, cr.height()))
         self.gutter.update()
 
     def set_show_numbers(self, on: bool):
@@ -313,7 +327,7 @@ class BookEditor(QTextEdit):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._place_gutter()
+        self._update_gutter_width()
         self._spell_timer.start()
 
     def _view_changed(self, *_):

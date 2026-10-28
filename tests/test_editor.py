@@ -465,3 +465,39 @@ def test_jump_from_footnote_back_to_text():
     assert ed.jump_to_reference("n2")
     assert ed.textCursor().block() == link_block and ed.textCursor().selectedText() == "[2]"
     assert ed.go_back() and ed.textCursor().block() == note2_text
+
+
+def test_single_book_projects(monkeypatch=None):
+    from PySide6.QtWidgets import QFileDialog
+
+    import fb2editor.app as appmod
+
+    tmp = tempfile.mkdtemp()
+    path = os.path.join(tmp, "book.fb2")
+    with open(path, "wb") as fh:
+        fh.write(_book("ru").replace(b"<book-title>T</book-title>", b"<book-title>Moya kniga</book-title><lang>ru</lang>"))
+    store = ProjectStore(os.path.join(tmp, "data"))
+    w = appmod.MainWindow(store)
+    w.resize(1300, 800)
+    w.show()
+    orig = QFileDialog.getOpenFileName
+    QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (path, ""))
+    try:
+        w.open_book()
+        p = w.project
+        assert p.single and p.name == "Moya kniga" and p.label("left") == "RU"
+        assert w.left.editor.book is not None
+        assert not w.right.isVisible() and not w.middle.isVisible()
+        assert not w.act["two_books"].isChecked() and not w.act["sync"].isEnabled()
+        # opening the same file again reopens its project instead of making a copy
+        w.open_book()
+        assert len(store.list()) == 1 and w.project.id == p.id
+    finally:
+        QFileDialog.getOpenFileName = orig
+    # switch to two books: the right side waits for a second file
+    w.act["two_books"].setChecked(True)
+    assert not w.project.single and w.right.isVisible() and w.middle.isVisible()
+    assert w.right.stack.currentIndex() == 1  # "open FB2" placeholder
+    w.act["two_books"].setChecked(False)
+    assert w.store.open(p.id).single
+    w.close()

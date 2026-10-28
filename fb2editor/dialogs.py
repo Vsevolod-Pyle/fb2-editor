@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
 )
 
@@ -54,9 +55,18 @@ class NewProjectDialog(QDialog):
         lay.setContentsMargins(24, 22, 24, 20)
         lay.setSpacing(12)
         lay.addWidget(_title("Новый проект"))
-        lay.addWidget(_muted("Выберите две версии книги — оригинал и перевод. "
-                             "Файлы копируются в проект, исходники не изменяются. "
-                             "Вторую книгу можно добавить позже."))
+        mode_row = QHBoxLayout()
+        self.single = QRadioButton("Одна книга")
+        self.single.setToolTip("Просто читать и редактировать одну книгу")
+        self.pair = QRadioButton("Оригинал и перевод")
+        self.pair.setToolTip("Две книги рядом с синхронной прокруткой")
+        self.pair.setChecked(True)
+        mode_row.addWidget(self.single)
+        mode_row.addWidget(self.pair)
+        mode_row.addStretch(1)
+        lay.addLayout(mode_row)
+        self.info = _muted("")
+        lay.addWidget(self.info)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
@@ -70,19 +80,22 @@ class NewProjectDialog(QDialog):
         self.right_label = QLineEdit("EN")
         self.left_file = FilePicker(lambda: self._start_dir)
         self.right_file = FilePicker(lambda: self._start_dir)
+        self._rows = []
         for row, (lab, picker) in enumerate(((self.left_label, self.left_file),
                                               (self.right_label, self.right_file)), start=1):
             lab.setMaximumWidth(64)
             lab.setToolTip("Короткая метка книги (язык)")
-            grid.addWidget(QLabel("Слева" if row == 1 else "Справа"), row, 0)
-            grid.addWidget(lab, row, 1)
-            grid.addWidget(picker, row, 2)
+            caption = QLabel("Слева" if row == 1 else "Справа")
             btn = QPushButton("Обзор…")
             btn.clicked.connect(picker.browse)
-            grid.addWidget(btn, row, 3)
+            for col, w in enumerate((caption, lab, picker, btn)):
+                grid.addWidget(w, row, col)
+            self._rows.append((caption, lab, picker, btn))
         self.left_file.textChanged.connect(self._autoname)
         grid.setColumnStretch(2, 1)
         lay.addLayout(grid)
+        self.single.toggled.connect(self._mode_changed)
+        self._mode_changed()
 
         buttons = QHBoxLayout()
         buttons.addStretch(1)
@@ -96,6 +109,21 @@ class NewProjectDialog(QDialog):
         buttons.addWidget(ok)
         lay.addSpacing(6)
         lay.addLayout(buttons)
+
+    def _mode_changed(self, *_):
+        single = self.single.isChecked()
+        for w in self._rows[1]:
+            w.setVisible(not single)
+        self._rows[0][0].setText("Книга" if single else "Слева")
+        self.info.setText(
+            "Выберите книгу. Файл копируется в проект, исходник не изменяется. "
+            "Вторую книгу для сравнения можно добавить позже." if single else
+            "Выберите две версии книги — оригинал и перевод. Файлы копируются в проект, "
+            "исходники не изменяются. Вторую книгу можно добавить позже.")
+        self.adjustSize()
+
+    def mode(self) -> str:
+        return "single" if self.single.isChecked() else "pair"
 
     def _autoname(self, path: str):
         if not self.name.text().strip() or getattr(self, "_auto", False):

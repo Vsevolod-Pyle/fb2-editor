@@ -111,6 +111,20 @@ class Fb2Book:
                 return " ".join("".join(el.itertext()).split())
         return ""
 
+    @property
+    def lang(self) -> str:
+        """Language from <title-info><lang>, e.g. 'ru'."""
+        if not self.description:
+            return ""
+        try:
+            desc = etree.fromstring(self.description)
+        except etree.XMLSyntaxError:
+            return ""
+        for el in desc.iter():
+            if local(el) == "lang" and local(el.getparent()) == "title-info":
+                return (el.text or "").strip()
+        return ""
+
     def add_image(self, image: QImage) -> str:
         """Store a pasted image and return its binary id."""
         big = image.width() * image.height() > 600_000 and not image.hasAlphaChannel()
