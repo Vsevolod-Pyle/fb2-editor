@@ -9,7 +9,7 @@ import html
 
 from bisect import bisect_left
 
-from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QRect, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -169,7 +169,8 @@ class Gutter(QWidget):
         layout = doc.documentLayout()
         offset = ed.verticalScrollBar().value()
         cur = ed.textCursor().blockNumber()
-        first = ed.cursorForPosition(QPoint(0, 0)).block()
+        hit = layout.hitTest(QPointF(doc.documentMargin() + 1, offset), Qt.HitTestAccuracy.FuzzyHit)
+        first = doc.findBlock(max(0, hit))
         i = bisect_left(content, first.blockNumber())
         h = ed.viewport().height()
         while i < len(content):
@@ -217,7 +218,8 @@ class BookEditor(QTextEdit):
         self.setTabChangesFocus(False)
         self.setObjectName("bookEditor")
         self._pair_block = -1
-        self._find_selections: list = []
+        self._find_ranges: list[tuple[int, int]] = []  # search hits as (start, end) positions
+        self._find_starts: list[int] = []
         self._ids_rev = -1
         self._ids: dict[str, tuple[int, str | None]] = {}
         self._back: list[int] = []
@@ -262,6 +264,7 @@ class BookEditor(QTextEdit):
         doc.contentsChanged.connect(self._view_changed)
         self._pair_block = -1
         self._flash_block = -1
+        self._find_ranges, self._find_starts = [], []
         self._spell_sels = []
         self._note_ranges = []
         self._note_sels = []
@@ -442,15 +445,34 @@ class BookEditor(QTextEdit):
         self.spell_enabled = on
         self.refresh_spelling()
 
+    MAX_VISIBLE_BLOCKS = 300
+
     def _visible_blocks(self):
+        """Blocks on screen (plus one before and after), found by their real positions."""
         doc = self.document()
-        first = self.cursorForPosition(QPoint(0, 0)).block()
-        last = self.cursorForPosition(QPoint(self.viewport().width(), self.viewport().height())).block()
-        b = first.previous() if first.previous().isValid() else first
-        end = last.next().blockNumber() if last.next().isValid() else doc.blockCount() - 1
-        while b.isValid() and b.blockNumber() <= end:
+        layout = doc.documentLayout()
+        top = self.verticalScrollBar().value()
+        bottom = top + self.viewport().height()
+        hit = layout.hitTest(QPointF(doc.documentMargin() + 1, top), Qt.HitTestAccuracy.FuzzyHit)
+        b = doc.findBlock(max(0, hit))
+        if b.previous().isValid():
+            b = b.previous()
+        count = 0
+        while b.isValid() and count < self.MAX_VISIBLE_BLOCKS:
             yield b
+            count += 1
+            if layout.blockBoundingRect(b).y() > bottom:
+                break
             b = b.next()
+
+    def visible_range(self) -> tuple[int, int]:
+        """(first, last) document positions that can be on screen."""
+        first = last = None
+        for b in self._visible_blocks():
+            if first is None:
+                first = b.position()
+            last = b.position() + b.length()
+        return (first or 0, last or 0)
 
     def refresh_spelling(self):
         if self.book is not None:
@@ -1124,9 +1146,39 @@ class BookEditor(QTextEdit):
             self._pair_block = number
             self._update_extra()
 
-    def set_find_hits(self, cursors: list[QTextCursor]):
-        self._find_selections = cursors
+    def set_find_hits(self, ranges: list[tuple[int, int]]):
+        """Search hits as sorted (start, end) positions; only the visible ones are painted."""
+        self._find_ranges = ranges
+        self._find_starts = [r[0] for r in ranges]
         self._update_extra()
+
+    MAX_PAINTED_HITS = 400
+
+    def _visible_find_selections(self) -> list:
+        if not self._find_ranges:
+            return []
+        doc = self.document()
+        top, bottom = self.visible_range()
+        i = max(0, bisect_left(self._find_starts, top) - 1)
+        last = doc.characterCount() - 1
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor(255, 200, 0, 120))
+        out = []
+        while i < len(self._find_ranges) and len(out) < self.MAX_PAINTED_HITS:
+            start, end = self._find_ranges[i]
+            if start > bottom:
+                break
+            i += 1
+            if end > last:
+                continue
+            c = QTextCursor(doc)
+            c.setPosition(start)
+            c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            sel = QTextEdit.ExtraSelection()
+            sel.format = fmt
+            sel.cursor = c
+            out.append(sel)
+        return out
 
     def _block_selections(self, number: int, col: QColor) -> list:
         block = self.document().findBlockByNumber(number)
@@ -1160,11 +1212,7 @@ class BookEditor(QTextEdit):
         sels += self._back_sels
         sels += self._note_sels
         sels += self._spell_sels
-        for c in self._find_selections:
-            s = QTextEdit.ExtraSelection()
-            s.format.setBackground(QColor(255, 200, 0, 120))
-            s.cursor = c
-            sels.append(s)
+        sels += self._visible_find_selections()
         self.setExtraSelections(sels)
 
     # ------------------------------------------------------------------ #

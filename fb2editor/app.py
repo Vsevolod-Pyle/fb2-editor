@@ -453,7 +453,12 @@ class FindBar(QFrame):
             h.addWidget(w)
         h.addWidget(self.info, 1)
         h.addWidget(self.close_btn)
-        self.find.textChanged.connect(lambda: win.find_update())
+        # search a moment after typing stops, not on every key press
+        self.timer = QTimer(self)
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(220)
+        self.timer.timeout.connect(lambda: win.find_update())
+        self.find.textChanged.connect(lambda: self.timer.start())
         self.case.toggled.connect(lambda: win.find_update())
         self.both.toggled.connect(lambda: win.find_update())
         self.find.returnPressed.connect(lambda: win.find_next(False))
@@ -1643,23 +1648,38 @@ class MainWindow(QMainWindow):
             return [p.editor for p in (self.left, self.right) if p.editor.book]
         return [self.active] if self.active.book else []
 
+    MAX_FIND_HITS = 20000
+
     def find_update(self):
+        self.find_bar.timer.stop()
         text = self.find_bar.find.text()
-        total = 0
+        total, capped = 0, False
+        targets = self._find_targets() if text else []
         for p in (self.left, self.right):
             ed = p.editor
-            hits = []
-            if text and ed in self._find_targets():
+            hits: list[tuple[int, int]] = []
+            if ed in targets:
                 doc = ed.document()
-                c = doc.find(text, 0, self._find_flags())
-                while not c.isNull() and len(hits) < 5000:
-                    hits.append(c)
-                    c = doc.find(text, c, self._find_flags())
+                flags = self._find_flags()
+                c = doc.find(text, 0, flags)
+                while not c.isNull():
+                    if len(hits) >= self.MAX_FIND_HITS:
+                        capped = True
+                        break
+                    hits.append((c.selectionStart(), c.selectionEnd()))
+                    if c.selectionEnd() <= c.selectionStart():
+                        break
+                    c = doc.find(text, c.selectionEnd(), flags)
             ed.set_find_hits(hits)
             total += len(hits)
-        self.find_bar.info.setText(f"Найдено: {total}" if text else "")
+        if not text:
+            self.find_bar.info.setText("")
+        else:
+            self.find_bar.info.setText(f"Найдено: {total}" + ("+" if capped else ""))
 
     def find_next(self, backward=False):
+        if self.find_bar.timer.isActive():
+            self.find_update()
         text = self.find_bar.find.text()
         if not text or not self.find_bar.isVisible():
             if not self.find_bar.isVisible():
@@ -1796,6 +1816,9 @@ def main():
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("fb2.translation.editor")
         except Exception:  # noqa: BLE001
             pass
+    from . import crashlog
+
+    previous_crash = crashlog.install()
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
@@ -1805,4 +1828,10 @@ def main():
     _install_translations(app)
     win = MainWindow()
     win.show()
+    if previous_crash:
+        QTimer.singleShot(800, lambda: QMessageBox.information(
+            win, APP_NAME,
+            "В прошлый раз программа закрылась аварийно.\n\n"
+            f"Отчёт сохранён в файле:\n{previous_crash}\n\n"
+            "Пришлите его разработчику — по нему можно найти причину."))
     return app.exec()

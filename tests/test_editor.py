@@ -503,3 +503,33 @@ def test_single_book_projects(monkeypatch=None):
     w.act["two_books"].setChecked(False)
     assert w.store.open(p.id).single
     w.close()
+
+
+def test_search_paints_only_visible_hits_and_survives_book_switch():
+    w, p = _window()
+    L = w.left.editor
+    w._set_active(L)
+    w.open_find()
+    w.find_bar.find.setText("text")
+    assert w.find_bar.timer.isActive()  # search waits until typing stops
+    w.find_update()
+    total = int(w.find_bar.info.text().split()[-1].rstrip("+"))
+    assert total == len(L._find_ranges) > 500
+    painted = L._visible_find_selections()
+    assert 0 < len(painted) < len(L._find_ranges)
+    top, bottom = L.visible_range()
+    assert all(top - 50 <= s.cursor.selectionStart() <= bottom for s in painted)
+    # F3 / Enter before the delayed search ran still finds the new text
+    w.find_bar.find.setText("Глава 3")
+    w.find_next(False)
+    assert L.textCursor().selectedText() == "Глава 3"
+    # opening another version clears the hits of the old text
+    L.document().setModified(False)
+    w._load_side("left", p.current("left"))
+    assert L._find_ranges == [] and L._visible_find_selections() == []
+    w.find_update()
+    assert L._find_ranges
+    w.close_find()
+    assert L._find_ranges == []
+    L.document().setModified(False)
+    w.close()
