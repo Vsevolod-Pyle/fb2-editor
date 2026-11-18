@@ -245,11 +245,11 @@ def test_spelling_numbers_progress_and_double_click():
     # paragraph numbering and progress
     assert L.gutter.width() > 0
     w.update_progress()
-    assert w.left.progress.text().startswith("¶ 1 / ")
+    assert w.left.progress.text().startswith("¶ 1 / ") and "текст 0,0%" in w.left.progress.text()
     L.verticalScrollBar().setValue(L.verticalScrollBar().maximum())
     app.processEvents()
     w.update_progress()
-    assert "100,0%" in w.left.progress.text(), w.left.progress.text()
+    assert w.left.progress.text().count("100,0%") == 2, w.left.progress.text()
     total = len(w.sync.index(L).content)
     assert w.left.progress.text().startswith(f"¶ {total} / {total}")
 

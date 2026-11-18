@@ -8,7 +8,7 @@ from bisect import bisect_right
 import time
 from functools import partial
 
-from PySide6.QtCore import QEvent, QLibraryInfo, QLocale, QSize, Qt, QTimer, QTranslator, QUrl
+from PySide6.QtCore import QEvent, QPointF, QLibraryInfo, QLocale, QSize, Qt, QTimer, QTranslator, QUrl
 from PySide6.QtGui import (
     QAction,
     QCursor,
@@ -333,7 +333,8 @@ class Pane(QFrame):
         self.dirty.hide()
         self.progress = QLabel("")
         self.progress.setObjectName("progress")
-        self.progress.setToolTip("Номер абзаца в строке чтения и сколько книги пройдено")
+        self.progress.setToolTip("Слева: абзац вверху страницы и доля пройденных абзацев.\n"
+                                 "Справа: доля пройденного текста по количеству символов.")
         self.progress.setMinimumWidth(1)  # may be clipped in a very narrow window
         self.versions = ElasticCombo()
         self.versions.setObjectName("flat")
@@ -1159,13 +1160,20 @@ class MainWindow(QMainWindow):
                 pane.progress.setText("")
                 continue
             sb = ed.verticalScrollBar()
+            doc = ed.document()
+            chars = max(1, doc.characterCount() - 1)
             if sb.value() >= sb.maximum() and sb.maximum() > 0:
-                k = total - 1
+                k, pos = total - 1, chars
             else:
-                # the first paragraph visible at the top of the page
+                # the first paragraph / character visible at the top of the page
                 k = self.sync.content_index_at(ed, idx, sb.value() + 4)
-            pct = (k + 1) * 100 / total
-            pane.progress.setText(f"¶ {k + 1} / {total}  ·  {pct:.1f}%".replace(".", ","))
+                pos = doc.documentLayout().hitTest(QPointF(doc.documentMargin() + 1, sb.value() + 4),
+                                                   Qt.HitTestAccuracy.FuzzyHit)
+                pos = max(0, pos)
+            by_paras = (k + 1) * 100 / total
+            by_text = min(100.0, pos * 100 / chars)
+            pane.progress.setText(
+                f"¶ {k + 1} / {total} · {by_paras:.1f}%   │   текст {by_text:.1f}%".replace(".", ","))
             pane.progress.updateGeometry()
 
     def _speller_ready(self):
